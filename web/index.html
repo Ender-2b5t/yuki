@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>yuki</title>
+  <link rel="stylesheet" href="/style.css?v=20261028" />
+</head>
+<body>
+  <!-- Live2D canvas goes here -->
+  <div id="stage"></div>
+
+  <!-- 整个窗口可点击（点不同部位有反应）；顶部小横条用来拖动窗口 -->
+  <div id="dragbar" title="按住这里可以拖动 yuki"></div>
+  <div id="petzone"></div>
+
+  <div id="bubble" class="hidden"><span id="bubble-text"></span></div>
+
+  <div id="panel">
+    <div id="status" title="连接状态"></div>
+    <input id="input" type="text" placeholder="和 yuki 说点什么…（Enter 发送）" autocomplete="off" spellcheck="false" />
+    <button id="send" title="发送">➤</button>
+    <button id="mic" title="点一下说话（再点一下结束）">🎤</button>
+    <button id="handsfree" title="免提：点一下开启后，喊「yuki」就能唤醒">👂</button>
+    <button id="settings" title="设置">⚙</button>
+    <button id="mute" title="静音 / 取消静音">🔊</button>
+  </div>
+
+  <script src="/vendor/pixi.min.js"></script>
+  <script src="/vendor/live2dcubismcore.min.js"></script>
+  <script src="/vendor/cubism4.min.js"></script>
+  <script src="/pet.js?v=20261029"></script>
+</body>
+</html>

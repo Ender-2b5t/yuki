@@ -1,0 +1,31 @@
+# 运行时与依赖（不随仓库分发）
+runtime/
+.venv/
+node_modules/
+
+# 模型与第三方前端库（体积大、且各有许可，见 docs/SETUP_ASSETS.md）
+models/
+vendor/
+assets/
+
+# 本地数据（聊天记忆、长期记忆、日志、截图、歌曲、密钥）
+data/
+tmp/
+server/config.json
+*.log
+
+# 本地构建产物
+yuki.exe
+yuki.ico
+
+# 开发自检脚本（含本机路径）
+tools/
+
+# 系统垃圾
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+*.wav
+*.mp3

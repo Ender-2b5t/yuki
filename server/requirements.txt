@@ -1,0 +1,10 @@
+fastapi>=0.110
+uvicorn>=0.29
+websockets>=12
+httpx>=0.27
+edge-tts>=6.1
+numpy>=1.24
+sherpa-onnx>=1.10
+pyworld>=0.3
+pillow>=10.0
+rapidocr-onnxruntime>=1.3

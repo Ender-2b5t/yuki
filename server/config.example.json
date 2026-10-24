@@ -1,0 +1,23 @@
+{
+  "port": 8765,
+  "api_key": "",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-chat",
+  "temperature": 1.05,
+  "max_tokens": 700,
+  "history_turns": 24,
+  "summary_every": 12,
+  "voice": "zh-CN-XiaoyiNeural",
+  "rate": "+8%",
+  "pitch": "+4Hz",
+  "auto_greet": true,
+  "tools_enabled": true,
+  "awareness": true,
+  "proactive": true,
+  "comment_cooldown_sec": 240,
+  "proactive_after_sec": 1080,
+  "screen_comment": true,
+  "screen_comment_cooldown": 40,
+  "voice_enabled": false,
+  "wake_autostart": false
+}

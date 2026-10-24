@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python syntax check
+        run: |
+          python -m py_compile server/app.py server/tools.py server/screen.py server/stt.py server/sing.py server/awareness.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JS syntax check
+        run: |
+          node --check main.js
+          node --check preload.js
+          node --check web/pet.js

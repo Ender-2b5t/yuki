@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>yuki 设置</title>
+<style>
+  :root {
+    --bg: #14161f;
+    --card: #1d2030;
+    --card2: #232739;
+    --text: #e9ecff;
+    --muted: #8f96b8;
+    --accent: #7c8cff;
+    --accent2: #ff6f9c;
+    --ok: #4ade80;
+    --border: rgba(255,255,255,.08);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px 26px 40px;
+    background: radial-gradient(1200px 600px at 20% -10%, #2a2140 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+  h1 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .sub { color: var(--muted); margin-bottom: 20px; font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; color: #cfd5ff; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+  .row label { width: 130px; color: var(--muted); flex: 0 0 auto; }
+  input[type="text"], input[type="password"], select {
+    background: var(--card2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px 10px; font-size: 13.5px; min-width: 220px; outline: none;
+  }
+  input[type="text"]:focus, input[type="password"]:focus, select:focus { border-color: var(--accent); }
+  input[type="range"] { width: 240px; accent-color: var(--accent); }
+  .val { width: 70px; color: #cfd5ff; font-variant-numeric: tabular-nums; }
+  .switch { position: relative; width: 46px; height: 26px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; background: #363b55; border-radius: 999px;
+    transition: .18s; cursor: pointer;
+  }
+  .slider:before {
+    content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: .18s;
+  }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider:before { transform: translateX(20px); }
+  .toggle-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .toggle-row .name { min-width: 170px; }
+  .toggle-row .hint { color: var(--muted); font-size: 12px; }
+  .btns { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+  button {
+    background: var(--card2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 11px; padding: 9px 16px; font-size: 13.5px; cursor: pointer; transition: .15s;
+  }
+  button:hover { border-color: var(--accent); transform: translateY(-1px); }
+  button.primary { background: linear-gradient(135deg, #6d7bff, #a15cff); border: none; font-weight: 600; }
+  button.danger { border-color: rgba(255,110,140,.4); color: #ff9db4; }
+  .toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #2b3050; color: #fff; padding: 10px 18px; border-radius: 12px;
+    opacity: 0; pointer-events: none; transition: .25s; border: 1px solid var(--border);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .statusline { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .kv { color: #cfd5ff; }
+  .muted { color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
+  @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+  <h1><span class="dot"></span>yuki 设置</h1>
+  <div class="sub">改完点最下面「保存设置」——大部分立即生效，模型大小/位置会自动刷新画面。</div>
+
+  <div class="card">
+    <h2>她是谁</h2>
+    <div class="grid2">
+      <div class="row"><label>名字</label><input id="display_name" type="text" placeholder="yuki" /></div>
+      <div class="row"><label>人格</label>
+        <select id="mode">
+          <option value="normal">普通 yuki（可爱灵动）</option>
+          <option value="dark">黑 yuki（毒舌坏心眼）</option>
+        </select>
+      </div>
+      <div class="row"><label>声音</label><select id="voice"></select></div>
+      <div class="row">
+        <label>语速</label>
+        <input id="rate" type="range" min="-20" max="30" step="2" />
+        <span class="val" id="rate_val"></span>
+      </div>
+      <div class="row">
+        <label>音调</label>
+        <input id="pitch" type="range" min="-20" max="20" step="1" />
+        <span class="val" id="pitch_val"></span>
+      </div>
+      <div class="row"><label>DeepSeek Key</label>
+        <input id="api_key" type="password" placeholder="留空 = 不修改" />
+      </div>
+    </div>
+    <div class="statusline">Key 状态：<span id="key_state" class="kv">-</span></div>
+    <div class="statusline">此刻的她：<span id="life_state" class="kv">-</span></div>
+  </div>
+
+  <div class="card">
+    <h2>生命状态（本地保存，重启不会忘）</h2>
+    <div class="statusline">心情：<span id="life_mood" class="kv">-</span>，精神：<span id="life_energy" class="kv">-</span></div>
+    <div class="statusline">关系：<span id="life_level" class="kv">-</span>（好感 <span id="life_love">-</span>），今天聊了 <span id="life_today">-</span> 次，摸头 <span id="life_pats">-</span> 次</div>
+    <div class="statusline">聊天记录、长期记忆、关系进度都存在 <b>data/</b> 文件夹里。</div>
+  </div>
+
+  <div class="card">
+    <h2>行为</h2>
+    <div class="grid2">
+      <div class="toggle-row"><div class="name">自动打招呼</div><label class="switch"><input id="auto_greet" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">语音输出（说话）</div><label class="switch"><input id="voice_enabled" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">允许控制电脑</div><label class="switch"><input id="tools_enabled" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">知觉（看你在用什么）</div><label class="switch"><input id="awareness" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">主动搭话</div><label class="switch"><input id="proactive" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">看屏幕吐槽（读屏幕文字）</div><label class="switch"><input id="screen_comment" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">开机自动免提</div><label class="switch"><input id="wake_autostart" type="checkbox"><span class="slider"></span></label></div>
+    </div>
+    <div class="row"><label>主动搭话间隔</label><input id="proactive_minutes" type="range" min="5" max="120" step="5" /><span class="val" id="proactive_val"></span></div>
+    <div class="row"><label>看屏幕吐槽间隔</label><input id="screen_comment_cooldown" type="range" min="20" max="180" step="10" /><span class="val" id="screen_comment_val"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>形象（Live2D）</h2>
+    <div class="row"><label>模型</label><select id="model" style="min-width:300px"></select></div>
+    <div class="row"><label>大小</label><input id="scale" type="range" min="0.6" max="1.3" step="0.02" /><span class="val" id="scale_val"></span></div>
+    <div class="row"><label>上下位置</label><input id="offsetY" type="range" min="-0.15" max="0.15" step="0.005" /><span class="val" id="offsetY_val"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>杂项</h2>
+    <div class="btns">
+      <button onclick="openLogs()">打开日志文件夹</button>
+      <button onclick="openModels()">打开模型文件夹</button>
+      <button class="danger" onclick="clearMemory()">清空聊天记忆</button>
+    </div>
+    <div class="statusline">清空记忆会删掉本地聊天记录和长期记忆笔记（不可恢复）。</div>
+  </div>
+
+  <div class="btns" style="margin-top:18px">
+    <button class="primary" onclick="saveAll()">保存设置</button>
+    <button onclick="loadAll()">重新读取</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null;
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function parseRate(v) {
+  if (!v) return 0;
+  const m = String(v).match(/([+-]?\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+function rateStr(n) { return (n >= 0 ? '+' : '') + n + '%'; }
+function pitchStr(n) { return (n >= 0 ? '+' : '') + n + 'Hz'; }
+
+function fillVoices(voices, current) {
+  const sel = $('voice');
+  sel.innerHTML = '';
+  for (const v of voices) {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    opt.textContent = v.name;
+    if (v.id === current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function fillModels(models, current) {
+  const sel = $('model');
+  sel.innerHTML = '';
+  for (const m of models) {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    if (m === current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (!models.includes(current)) {
+    const opt = document.createElement('option');
+    opt.value = current; opt.textContent = current; opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+async function loadAll() {
+  const r = await fetch('/api/settings');
+  state = await r.json();
+  const p = state.persona, c = state.config, m = state.model;
+  $('display_name').value = p.display_name || 'yuki';
+  $('mode').value = p.mode || 'normal';
+  fillVoices(state.voices, p.voice);
+  $('rate').value = parseRate(p.rate);
+  $('pitch').value = parseInt(p.pitch || '0', 10) || 0;
+  updateRateLabels();
+  $('api_key').value = '';
+  $('api_key').placeholder = c.api_key_set ? ('已设置：' + c.api_key_masked + '（留空不修改）') : '没有设置，填一个 sk- 开头的 key';
+  $('key_state').textContent = c.api_key_set ? ('已配置 ' + c.api_key_masked) : '未配置（她不会说话）';
+  for (const id of ['auto_greet','voice_enabled','tools_enabled','awareness','proactive','screen_comment','wake_autostart']) {
+    $(id).checked = !!c[id];
+  }
+  $('proactive_minutes').value = Math.round(c.proactive_minutes || 18);
+  $('screen_comment_cooldown').value = Math.round(c.screen_comment_cooldown || 40);
+  updateIntervalLabels();
+  fillModels(m.available || [], m.current);
+  $('scale').value = m.scale || 1;
+  $('offsetY').value = m.offsetY || 0;
+  updateModelLabels();
+  refreshLife();
+}
+
+async function refreshLife() {
+  try {
+    const r = await fetch('/api/state');
+    const d = await r.json();
+    if (!d || !d.ok) return;
+    $('life_state').textContent = d.level + ' · 心情 ' + Math.round(d.mood) + '/100';
+    $('life_mood').textContent = Math.round(d.mood) + '/100';
+    $('life_energy').textContent = Math.round(d.energy) + '/100';
+    $('life_level').textContent = d.level;
+    $('life_love').textContent = Math.round(d.love);
+    $('life_today').textContent = d.today_chats;
+    $('life_pats').textContent = d.pats;
+  } catch (e) { /* ignore */ }
+}
+
+function updateRateLabels() {
+  $('rate_val').textContent = rateStr(parseInt($('rate').value, 10));
+  $('pitch_val').textContent = pitchStr(parseInt($('pitch').value, 10));
+}
+function updateIntervalLabels() {
+  $('proactive_val').textContent = $('proactive_minutes').value + ' 分钟';
+  $('screen_comment_val').textContent = $('screen_comment_cooldown').value + ' 秒';
+}
+function updateModelLabels() {
+  $('scale_val').textContent = parseFloat($('scale').value).toFixed(2);
+  $('offsetY_val').textContent = parseFloat($('offsetY').value).toFixed(3);
+}
+
+async function saveAll() {
+  const body = {
+    display_name: $('display_name').value.trim(),
+    mode: $('mode').value,
+    voice: $('voice').value,
+    rate: rateStr(parseInt($('rate').value, 10)),
+    pitch: pitchStr(parseInt($('pitch').value, 10)),
+    auto_greet: $('auto_greet').checked,
+    voice_enabled: $('voice_enabled').checked,
+    tools_enabled: $('tools_enabled').checked,
+    awareness: $('awareness').checked,
+    proactive: $('proactive').checked,
+    screen_comment: $('screen_comment').checked,
+    screen_comment_cooldown: parseInt($('screen_comment_cooldown').value, 10),
+    wake_autostart: $('wake_autostart').checked,
+    proactive_minutes: parseInt($('proactive_minutes').value, 10),
+    model: $('model').value,
+    scale: parseFloat($('scale').value),
+    offsetY: parseFloat($('offsetY').value),
+  };
+  const key = $('api_key').value.trim();
+  if (key) body.api_key = key;
+  const r = await fetch('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const res = await r.json();
+  if (res.ok) {
+    toast('保存成功：她现在叫「' + res.persona + '」');
+    setTimeout(loadAll, 300);
+  } else {
+    toast('保存失败：' + (res.error || '未知错误'));
+  }
+}
+
+async function clearMemory() {
+  if (!confirm('确定清空所有聊天记忆和长期记忆笔记吗？')) return;
+  const r = await fetch('/api/memory/clear', { method: 'POST' });
+  const res = await r.json();
+  toast(res.ok ? '记忆已清空' : '清空失败');
+}
+
+function openLogs() { if (window.nurowDesktop) window.nurowDesktop.openLogs(); }
+function openModels() { window.nurowDesktop && window.nurowDesktop.openModels && window.nurowDesktop.openModels(); }
+
+$('rate').addEventListener('input', updateRateLabels);
+$('pitch').addEventListener('input', updateRateLabels);
+$('proactive_minutes').addEventListener('input', updateIntervalLabels);
+$('screen_comment_cooldown').addEventListener('input', updateIntervalLabels);
+$('scale').addEventListener('input', updateModelLabels);
+$('offsetY').addEventListener('input', updateModelLabels);
+loadAll();
+</script>
+</body>
+</html>

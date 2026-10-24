@@ -1,0 +1,24 @@
+{
+  "name": "yuki",
+  "version": "0.1.0",
+  "private": true,
+  "description": "yuki - Neuro-sama style AI desktop companion (Live2D + DeepSeek + edge-tts), with local memory and PC control tools",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron --no-sandbox ."
+  },
+  "keywords": [
+    "live2d",
+    "desktop-pet",
+    "ai-companion",
+    "deepseek",
+    "edge-tts",
+    "sherpa-onnx",
+    "electron"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.0"
+  },
+  "author": "Ender-2b5t (https://github.com/Ender-2b5t)"
+}
