@@ -38,9 +38,29 @@
     gaze: null,
     gazeX: 0,
     gazeY: 0,
+    cursor: null,
+    gx: 0,
+    gy: 0,
     idleGaze: null,
     idleTilt: 0,
     curTilt: 0,
+    idleBodyX: 0,
+    idleBodyZ: 0,
+    curBodyX: 0,
+    curBodyZ: 0,
+    talkEnergy: 0,
+    curExpr: null,
+    exprTimer: 0,
+    persistExprs: [],
+    exprDefs: {},
+    exprDefsReady: false,
+    tempExpr: null,
+    idleLevel: 'normal',
+    talkFlap: true,
+    clickReact: true,
+    gazeFollow: true,
+    gazeSpeed: 'fast',
+    idleActions: true,
   };
 
   // ------------------------------------------------------------------ PIXI --
@@ -92,11 +112,11 @@
 
   // ------------------------------------------------------ 点击部位 / 表情 --
   const PART_EXPR_KEYWORDS = {
-    head: ['星星眼', '脸红'],
-    face: ['脸红', '吐舌'],
-    body: ['生气', '晕'],
-    legs: ['哭', '生气'],
-    tail: ['爱心眼', '吐舌'],
+    head: ['星星眼', '脸红', '爱心眼'],
+    face: ['脸红', '吐舌', '泪眼汪汪'],
+    body: ['生气', '眩晕', '死鱼眼'],
+    legs: ['哭哭', '生气', '脸红'],
+    tail: ['爱心眼', '吐舌', '星星眼'],
   };
 
   function hitPart(clientX, clientY) {
@@ -113,12 +133,120 @@
     return 'legs';
   }
 
-  function playExprByKeywords(kws) {
+  const EXPR_ALIASES = {
+    tongue: ['吐舌'],
+    star: ['星星眼'],
+    heart: ['爱心眼'],
+    cry: ['哭哭'],
+    teary: ['泪眼汪汪'],
+    dead: ['死鱼眼'],
+    angry: ['眼-生气'],
+    dizzy: ['眩晕'],
+    blush: ['脸红'],
+    dark: ['脸黑'],
+    calm: ['平静v形'],
+    glasses: ['眼镜'],
+    cat: ['抱猫'],
+    scarf: ['围巾'],
+    sweater: ['毛衣'],
+    hat: ['帽子隐藏'],
+    ears: ['兽耳-隐藏'],
+    tail: ['兽尾-隐藏1'],
+    eyeshadow: ['眼影隐藏'],
+    fringe: ['前发-去掉半透'],
+    bun: ['后发-右小啾啾隐藏'],
+    longhair: ['后发-长发隐藏'],
+  };
+  const exprCache = {};
+
+  function refreshExprCache() {
+    const map = state.expressions || {};
+    Object.keys(EXPR_ALIASES).forEach((key) => {
+      exprCache[key] = null;
+      for (const id of Object.keys(map)) {
+        const name = String(map[id] || '');
+        if (EXPR_ALIASES[key].some((sub) => name.indexOf(sub) >= 0)) { exprCache[key] = id; break; }
+      }
+    });
+    console.log('[nurow] expr cache ready:', Object.keys(exprCache).filter((k) => exprCache[k]).join(','));
+  }
+
+  function playExpression(id, holdMs) {
+    const m = state.model;
+    if (!m || !id) return;
+    if (state.exprDefsReady) {
+      state.tempExpr = { id, until: performance.now() + (holdMs || 1600) };
+      return;
+    }
+    try { m.expression(id); } catch (e) { return; }
+    state.curExpr = id;
+    clearTimeout(state.exprTimer);
+    if (holdMs > 0) {
+      state.exprTimer = setTimeout(() => {
+        if (!state.model) return;
+        try { state.model.expression(); state.curExpr = null; } catch (e) { /* ignore */ }
+      }, holdMs);
+    }
+  }
+
+  // 读取所有 exp3 表情定义（用于多选叠加）
+  async function loadExpressionDefs() {
+    try {
+      const cfg = state.cfg;
+      if (!cfg || !cfg.url) return;
+      const model3 = await (await fetch(cfg.url)).json();
+      const list = (model3.FileReferences && model3.FileReferences.Expressions) || [];
+      const base = cfg.url.slice(0, cfg.url.lastIndexOf('/') + 1);
+      const defs = {};
+      await Promise.all(list.map(async (e) => {
+        try {
+          const d = await (await fetch(base + e.File)).json();
+          defs[e.Name] = d;
+        } catch (err) { /* ignore */ }
+      }));
+      state.exprDefs = defs;
+      state.exprDefsReady = Object.keys(defs).length > 0;
+      console.log('[nurow] expression defs loaded:', Object.keys(defs).length,
+        '| persist:', state.persistExprs.join(',') || 'none');
+    } catch (e) { console.warn('[nurow] expr defs failed', e); }
+  }
+
+  // 每帧把常驻 + 临时表情叠加到模型参数上（在模型动画更新之后执行）
+  function applyExpressionOverrides(core) {
+    if (!state.exprDefsReady) return;
+    const now = performance.now();
+    const active = (state.persistExprs || []).slice();
+    if (state.tempExpr) {
+      if (now < state.tempExpr.until) active.push(state.tempExpr.id);
+      else state.tempExpr = null;
+    }
+    for (const id of active) {
+      const def = state.exprDefs[id];
+      if (!def) continue;
+      (def.Parameters || []).forEach((p) => {
+        if (!p || !p.Id) return;
+        const v = Number(p.Value) || 0;
+        let cur = 0;
+        try { cur = core.getParameterValueById(p.Id); } catch (e) { return; }
+        let nv = v;
+        if (p.Blend === 'Multiply') nv = cur * v;
+        else if (p.Blend === 'Overwrite') nv = v;
+        else nv = cur + v;
+        try { core.setParameterValueById(p.Id, nv); } catch (e) { /* ignore */ }
+      });
+      (def.Parts || []).forEach((pt) => {
+        if (!pt || !pt.Id) return;
+        try { core.setPartOpacityById(pt.Id, Number(pt.Opacity) || 0); } catch (e) { /* ignore */ }
+      });
+    }
+  }
+
+  function playExprByKeywords(kws, holdMs) {
     const map = state.expressions || {};
     const ids = Object.keys(map).filter((id) => kws.some((k) => String(map[id]).indexOf(k) >= 0));
     if (!ids.length) return;
     const pick = ids[Math.floor(Math.random() * ids.length)];
-    try { state.model.expression(pick); } catch (e) { /* ignore */ }
+    playExpression(pick, holdMs || 2200);
     console.log('[nurow] expression', pick, map[pick]);
   }
 
@@ -130,12 +258,16 @@
   function reactToReply(text) {
     const t = String(text || '');
     let kws = null;
-    if (/哼|才不|讨厌|笨蛋|傻瓜/.test(t)) kws = ['生气', '脸红'];
-    else if (/嘿嘿|好耶|开心|喜欢|最喜欢|真棒/.test(t)) kws = ['星星眼', '爱心眼'];
-    else if (/呜|哭|委屈|难过/.test(t)) kws = ['哭'];
-    else if (/害羞|脸红|羞/.test(t)) kws = ['脸红'];
+    let hold = 2400;
+    if (/哼|才不|讨厌|笨蛋|傻瓜|不理你/.test(t)) { kws = ['生气', '脸红', '吐舌']; hold = 1800; }
+    else if (/嘿嘿|好耶|开心|喜欢|最喜欢|真棒|爱你/.test(t)) kws = ['星星眼', '爱心眼', '脸红'];
+    else if (/呜|哭|委屈|难过|伤心/.test(t)) { kws = ['哭哭', '泪眼汪汪']; hold = 3000; }
+    else if (/害羞|脸红|羞/.test(t)) kws = ['脸红', '吐舌'];
+    else if (/困|累|睡觉|睡了/.test(t)) { kws = ['死鱼眼', '平静v形']; hold = 3000; }
+    else if (/惊|吓|真的假的|天呐/.test(t)) { kws = ['眩晕']; hold = 1800; }
+    else if (/无语|呵呵|随便/.test(t)) kws = ['死鱼眼'];
     if (kws) {
-      playExprByKeywords(kws);
+      playExprByKeywords(kws, hold);
       state.bounce = { t: 0 };
     }
   }
@@ -168,23 +300,69 @@
     } catch (e) { /* ignore */ }
   }
 
-  app.ticker.add(() => {
+  const TICK = { last: 0 };
+
+  function proceduralTick() {
     const m = state.model;
     if (!m) return;
-    // 被点之后的轻轻弹一下
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - (TICK.last || now)) / 1000);
+    TICK.last = now;
+    const t = now / 1000;
+
+    // 被点之后轻轻弹一下
     if (state.bounce) {
-      state.bounce.t += app.ticker.deltaMS;
+      state.bounce.t += dt * 1000;
       const p = Math.min(1, state.bounce.t / 420);
       m.y = state.baseY - Math.sin(p * Math.PI) * 9;
       if (p >= 1) {
         m.y = state.baseY;
         state.bounce = null;
       }
+    } else if (state.gazeSpeed === 'slow') {
+      // 原版手感：不加额外浮动，身体动作完全交给模型自带 Idle
+      m.y = state.baseY;
+    } else {
+      // 呼吸上下微动 + 说话时的小点头
+      const talkBob = (state.talkEnergy || 0) * Math.sin(t * 9) * 1.2;
+      m.y = state.baseY + Math.sin(t * 1.6) * 0.6 + talkBob;
     }
-    // 小幅歪头，增加"活着"的感觉
-    state.curTilt += (state.idleTilt - state.curTilt) * 0.12;
-    if (Math.abs(state.curTilt) > 0.0005) m.rotation = state.curTilt;
-    else m.rotation = 0;
+
+    // 歪头（灵敏=按时间平滑；柔和=原版逐帧）
+    if (state.gazeSpeed === 'slow') {
+      state.curTilt += (state.idleTilt - state.curTilt) * 0.12;
+    } else {
+      const tiltK = 1 - Math.exp(-dt / 0.12);
+      state.curTilt += (state.idleTilt - state.curTilt) * tiltK;
+    }
+    m.rotation = Math.abs(state.curTilt) > 0.0005 ? state.curTilt : 0;
+
+    // 身体重心缓慢换边（~350ms 平滑）
+    const bodyK = 1 - Math.exp(-dt / 0.35);
+    state.curBodyX += (state.idleBodyX - state.curBodyX) * bodyK;
+    state.curBodyZ += (state.idleBodyZ - state.curBodyZ) * bodyK;
+
+    // 视线/头部跟随：自己算，响应更快（约 60~80ms 到位）
+    // 柔和模式（原版）不接管这些参数，交给 focus
+    let gtx = 0;
+    let gty = 0;
+    if (state.gazeFollow) {
+      const src = state.idleGaze || state.cursor;
+      if (src) {
+        gtx = Math.max(-1, Math.min(1, (src.x - window.innerWidth / 2) / (window.innerWidth * 0.55)));
+        gty = Math.max(-1, Math.min(1, (src.y - window.innerHeight * 0.42) / (window.innerHeight * 0.60)));
+      }
+    }
+    // 鼠标跟随时很快；自己发呆乱看时更慢更柔
+    // 柔和模式 = 最初版体验（库默认约 0.5s 平滑）
+    const slowMode = state.gazeSpeed === 'slow';
+    const followTau = slowMode ? 0.50 : 0.09;
+    const glanceTau = slowMode ? 0.55 : 0.22;
+    const gk = 1 - Math.exp(-dt / (state.idleGaze ? glanceTau : followTau));
+    state.gx += (gtx - state.gx) * gk;
+    state.gy += (gty - state.gy) * gk;
+
+    // 口型：TTS 音量 + 文字流"说话"的嘴动
     let amp = 0;
     if (state.playing && state.analyser) {
       state.analyser.getByteTimeDomainData(state.timeData);
@@ -195,14 +373,59 @@
       }
       amp = Math.min(1, Math.sqrt(sum / state.timeData.length) * 2.6);
     }
-    const speed = amp > state.mouth ? 0.62 : 0.2;
-    state.mouth += (amp - state.mouth) * speed;
+    state.talkEnergy = (state.talkEnergy || 0) * Math.exp(-dt / 0.5);
+    const flap = state.talkFlap
+      ? state.talkEnergy * (0.18 + 0.62 * Math.abs(Math.sin(t * 12 + Math.sin(t * 5) * 2.5)))
+      : 0;
+    const target = Math.max(amp, flap);
+    if (state.gazeSpeed === 'slow') {
+      state.mouth += (target - state.mouth) * (target > state.mouth ? 0.62 : 0.2);
+    } else {
+      const mouthK = 1 - Math.exp(-dt * (target > state.mouth ? 20 : 8));
+      state.mouth += (target - state.mouth) * mouthK;
+    }
+
     try {
       const core = m.internalModel.coreModel;
-      setParam(core, 'ParamMouthOpenY', 'PARAM_MOUTH_OPEN_Y', state.mouth);
-      setParam(core, 'ParamMouthForm', 'PARAM_MOUTH_FORM', 0.2 + state.mouth * 0.45);
+      applyExpressionOverrides(core);
+      // 在模型自带 Idle 动作参数的基础上叠加，避免动作被完全覆盖后显得"僵"
+      const readP = (name, fallback) => {
+        try {
+          const v = core.getParameterValueById(name);
+          return typeof v === 'number' && isFinite(v) ? v : fallback;
+        } catch (e) { return fallback; }
+      };
+      setParam(core, 'ParamMouthOpenY', 'PARAM_MOUTH_OPEN_Y', Math.min(1, readP('ParamMouthOpenY', 0) * 0.35 + state.mouth));
+      setParam(core, 'ParamMouthForm', 'PARAM_MOUTH_FORM', readP('ParamMouthForm', 0) * 0.6 + 0.15 + state.mouth * 0.35);
+      if (state.gazeSpeed !== 'slow') {
+        setParam(core, 'ParamAngleX', 'PARAM_ANGLE_X', readP('ParamAngleX', 0) * 0.55 + state.gx * 20);
+        setParam(core, 'ParamAngleY', 'PARAM_ANGLE_Y', readP('ParamAngleY', 0) * 0.55 - state.gy * 18);
+        setParam(core, 'ParamAngleZ', 'PARAM_ANGLE_Z', readP('ParamAngleZ', 0) * 0.55 - state.gx * 4);
+        setParam(core, 'ParamEyeBallX', 'PARAM_EYE_BALL_X', state.gx);
+        setParam(core, 'ParamEyeBallY', 'PARAM_EYE_BALL_Y', -state.gy);
+        setParam(core, 'ParamBodyAngleX', 'PARAM_BODY_ANGLE_X', readP('ParamBodyAngleX', 0) * 0.5 + state.curBodyX + state.gx * 5);
+        setParam(core, 'ParamBodyAngleZ', 'PARAM_BODY_ANGLE_Z', readP('ParamBodyAngleZ', 0) * 0.5 + state.curBodyZ);
+        setParam(core, 'ParamBreath', 'PARAM_BREATH', readP('ParamBreath', 0.5) * 0.65 + 0.35 * (0.5 + 0.5 * Math.sin(t * 1.35)));
+      }
     } catch (e) { /* ignore */ }
-  });
+  }
+
+  // 确定性做法：挂在 internalModel.update 之后执行，保证覆盖模型动画参数
+  let proceduralRegistered = false;
+  function registerProceduralTick() {
+    if (proceduralRegistered) return;
+    const model = state.model;
+    if (!model || !model.internalModel) return;
+    proceduralRegistered = true;
+    const im = model.internalModel;
+    const origUpdate = im.update.bind(im);
+    im.update = function (dt, now) {
+      const r = origUpdate(dt, now);
+      try { proceduralTick(); } catch (e) { /* ignore */ }
+      return r;
+    };
+    console.log('[nurow] procedural hook installed');
+  }
 
   function showNoModel(cfg, extra) {
     if (document.getElementById('no-model')) return;
@@ -223,6 +446,32 @@
       div.appendChild(p);
     });
     document.body.appendChild(div);
+  }
+
+  async function loadAppearanceSettings() {
+    try {
+      const d = await (await fetch('/api/settings')).json();
+      const c = (d && d.config) || {};
+      state.persistExprs = Array.isArray(c.yuki_expressions)
+        ? c.yuki_expressions.map(String).filter((x) => /^expr_\d{2}$/.test(x)) : [];
+      // 兼容旧版「换装」单选：如果旧配置里有，自动迁移成对应表情
+      const LEGACY_OUTFIT = {
+        scarf: 'expr_32', sweater: 'expr_33', cat: 'expr_12', glasses: 'expr_22',
+        ears: 'expr_03', tail: 'expr_01', hat: 'expr_10', eyeshadow: 'expr_23',
+        fringe: 'expr_04', bun: 'expr_05', longhair: 'expr_07',
+      };
+      if (!state.persistExprs.length && c.yuki_outfit && LEGACY_OUTFIT[c.yuki_outfit]) {
+        state.persistExprs = [LEGACY_OUTFIT[c.yuki_outfit]];
+        console.log('[nurow] migrated legacy outfit:', c.yuki_outfit);
+      }
+      state.idleLevel = String(c.idle_level || 'normal');
+      state.talkFlap = c.talk_flap !== false;
+      state.clickReact = c.click_react !== false;
+      state.gazeFollow = c.gaze_follow !== false;
+      state.gazeSpeed = c.gaze_speed === 'slow' ? 'slow' : 'fast';
+      state.idleActions = c.idle_actions !== false;
+      console.log('[nurow] appearance:', state.persistExprs.join(',') || 'default', state.idleLevel, 'flap:', state.talkFlap);
+    } catch (e) { /* 用默认值 */ }
   }
 
   async function initModel() {
@@ -248,7 +497,14 @@
 
       layout();
       playIdle();
-      setInterval(playIdle, 15000);
+      registerProceduralTick();
+      loadExpressionDefs();
+      try {
+        const core = model.internalModel.coreModel;
+        const ids = (core._parameterIds || []).filter((id) => /Mouth|Breath|BodyAngle/i.test(id));
+        console.log('[nurow] params:', ids.join(','));
+      } catch (e) { /* ignore */ }
+      if (Object.keys(state.expressions || {}).length) refreshExprCache();
       console.log('[nurow] model loaded:', cfg.url);
     } catch (e) {
       console.error('[nurow] model load failed', e);
@@ -489,13 +745,16 @@
         break;
       case 'start':
         state.reply = '';
+        state.talkEnergy = 0.35;
         setBubble('', true);
         break;
       case 'delta':
         state.reply += msg.text || '';
+        state.talkEnergy = 1.0;
         setBubble(state.reply, true);
         break;
       case 'done':
+        state.talkEnergy = 0.1;
         setBubble(state.reply || '……', false, 9000);
         reactToReply(state.reply);
         if (Math.random() < 0.5) playTap();
@@ -514,7 +773,7 @@
         break;
       case 'wake':
         if (msg.state === 'armed') setBubble('免提开着：喊「yuki」叫我', false, 3000);
-        else if (msg.state === 'triggered') { setBubble('我在～', false, 2500); playTap(); }
+        else if (msg.state === 'triggered') { setBubble('我在～', false, 2500); playTap(); playExprByKeywords(['星星眼'], 1600); }
         else if (msg.state === 'idle') { /* 等她说话 */ }
         else if (msg.state === 'off') setBubble('免提关啦', false, 1500);
         break;
@@ -605,36 +864,67 @@
   if (window.nurowDesktop && window.nurowDesktop.onCursor) {
     window.nurowDesktop.onCursor((pt) => {
       if (!state.model) return;
-      try {
-        if (state.idleGaze) state.model.focus(state.idleGaze.x, state.idleGaze.y);
-        else state.model.focus(pt.x, pt.y);
-      } catch (err) { /* ignore */ }
+      state.cursor = { x: pt.x, y: pt.y };
+      if (state.gazeSpeed === 'slow') {
+        // 原版行为：交给 Live2D 库自带的 focus 平滑
+        try {
+          if (state.idleGaze) state.model.focus(state.idleGaze.x, state.idleGaze.y);
+          else state.model.focus(pt.x, pt.y);
+        } catch (err) { /* ignore */ }
+      }
     });
   }
 
-  // 空闲时的小动作：瞄一眼别处 / 歪头 / 轻轻弹一下
+  // 空闲时的小动作：四处看 / 歪头 / 换重心 / 小表情 / 小动作 / 偶尔换装
+  const IDLE_EXPR_POOL = ['tongue', 'star', 'heart', 'teary', 'dead', 'dizzy', 'blush', 'angry', 'glasses', 'calm'];
+
+  function runIdleAction() {
+    const r = Math.random();
+    if (r < 0.30) {
+      // 瞄一眼别处
+      state.idleGaze = {
+        x: Math.random() < 0.5 ? -220 : window.innerWidth + 220,
+        y: window.innerHeight * (0.22 + Math.random() * 0.55),
+      };
+      setTimeout(() => { state.idleGaze = null; }, 500 + Math.random() * 900);
+    } else if (r < 0.46) {
+      // 歪头
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      state.idleTilt = dir * (0.010 + Math.random() * 0.022);
+      setTimeout(() => { state.idleTilt = 0; }, 900 + Math.random() * 900);
+    } else if (r < 0.62) {
+      // 重心换到另一边
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      state.idleBodyX = dir * (5 + Math.random() * 8);
+      state.idleBodyZ = dir * (2 + Math.random() * 4);
+      setTimeout(() => { state.idleBodyX = 0; state.idleBodyZ = 0; }, 2200 + Math.random() * 2600);
+    } else if (r < 0.84) {
+      const key = IDLE_EXPR_POOL[Math.floor(Math.random() * IDLE_EXPR_POOL.length)];
+      const id = exprCache[key];
+      if (id) playExpression(id, 1200 + Math.random() * 1600);
+    } else if (r < 0.93) {
+      // 小动作（伸伸身子）
+      playTap();
+      if (Math.random() < 0.5) state.bounce = { t: 0 };
+    } else {
+      // 轻轻跳一下 / 伸个懒腰
+      state.bounce = { t: 0 };
+      if (Math.random() < 0.5) playTap();
+    }
+  }
+
   function scheduleIdle() {
+    const lv = state.idleLevel || 'normal';
+    const base = lv === 'quiet' ? 7000 : lv === 'lively' ? 1400 : 2400;
+    const span = lv === 'quiet' ? 9000 : lv === 'lively' ? 2600 : 5200;
     setTimeout(() => {
       try {
-        if (!state.model) { scheduleIdle(); return; }
-        const r = Math.random();
-        if (r < 0.45) {
-          state.idleGaze = {
-            x: Math.random() < 0.5 ? -160 : window.innerWidth + 160,
-            y: window.innerHeight * (0.22 + Math.random() * 0.55),
-          };
-          setTimeout(() => { state.idleGaze = null; }, 650 + Math.random() * 550);
-        } else if (r < 0.72) {
-          const dir = Math.random() < 0.5 ? -1 : 1;
-          state.idleTilt = dir * (0.008 + Math.random() * 0.018);
-          setTimeout(() => { state.idleTilt = 0; }, 900 + Math.random() * 700);
-        } else {
-          state.bounce = { t: 0 };
-        }
+        if (state.model && state.idleActions) runIdleAction();
       } catch (e) { /* ignore */ }
       scheduleIdle();
-    }, 5500 + Math.random() * 8000);
+    }, base + Math.random() * span);
   }
+
   // 按住拖动窗口；松开时没怎么动就当作"点击"
   let dragStart = null;
   let dragMoved = false;
@@ -660,6 +950,7 @@
   // 点击不同部位 → 不同反应
   els.petzone.addEventListener('click', (e) => {
     if (dragMoved) { dragMoved = false; return; }
+    if (!state.clickReact) return;
     const part = hitPart(e.clientX, e.clientY);
     console.log('[nurow] tap @', e.clientX, e.clientY, '->', part);
     if (!part) return;
@@ -673,11 +964,84 @@
   // 拉取表情中文名映射（点到部位时随机放对应表情）
   fetch('/api/model/expressions')
     .then((r) => r.json())
-    .then((d) => { state.expressions = (d && d.expressions) || {}; })
+    .then((d) => {
+      state.expressions = (d && d.expressions) || {};
+      refreshExprCache();
+    })
     .catch(() => {});
+  // ------------------------------------------------------------ 右键菜单 --
+  let ctxMenu = null;
+  function hideCtxMenu() {
+    if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
+  }
+
+  function showCtxMenu(x, y) {
+    hideCtxMenu();
+    const menu = document.createElement('div');
+    menu.id = 'ctx-menu';
+    Object.assign(menu.style, {
+      position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 999,
+      minWidth: '190px', maxHeight: Math.max(200, window.innerHeight - y - 16) + 'px', overflowY: 'auto',
+      background: 'rgba(24,27,44,0.97)', border: '1px solid rgba(255,255,255,0.16)',
+      borderRadius: '12px', padding: '6px', boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+      fontSize: '13px', color: '#e8eaf6', userSelect: 'none',
+      fontFamily: '"Microsoft YaHei UI","Segoe UI",sans-serif',
+    });
+    const map = state.expressions || {};
+    const sep = () => {
+      const d = document.createElement('div');
+      Object.assign(d.style, { height: '1px', background: 'rgba(255,255,255,0.12)', margin: '5px 4px' });
+      menu.appendChild(d);
+    };
+    const addItem = (label, fn, danger) => {
+      const it = document.createElement('div');
+      it.textContent = label;
+      Object.assign(it.style, { padding: '7px 10px', borderRadius: '8px', cursor: 'pointer', whiteSpace: 'nowrap' });
+      if (danger) it.style.color = '#ff9db4';
+      it.addEventListener('mouseenter', () => { it.style.background = 'rgba(120,130,255,0.18)'; });
+      it.addEventListener('mouseleave', () => { it.style.background = 'transparent'; });
+      it.addEventListener('click', (e) => { e.stopPropagation(); hideCtxMenu(); try { fn(); } catch (err) { /* ignore */ } });
+      menu.appendChild(it);
+      return it;
+    };
+    const desk = window.nurowDesktop || {};
+    addItem('设置…', () => desk.openSettings && desk.openSettings());
+    addItem('重置位置', () => desk.resetPosition && desk.resetPosition());
+    sep();
+    const head = document.createElement('div');
+    head.textContent = '快捷表情（点一下显示 5 秒）';
+    Object.assign(head.style, { padding: '4px 10px', fontSize: '11px', opacity: '0.62' });
+    menu.appendChild(head);
+    const ids = Object.keys(map);
+    if (!ids.length) {
+      const d = document.createElement('div');
+      d.textContent = '（表情还没加载好）';
+      Object.assign(d.style, { padding: '4px 10px', fontSize: '12px', opacity: '0.5' });
+      menu.appendChild(d);
+    } else {
+      ids.forEach((id) => addItem(map[id] || id, () => playExpression(id, 5000)));
+    }
+    sep();
+    addItem('隐藏 yuki（托盘图标可恢复）', () => desk.hideWindow && desk.hideWindow());
+    addItem('退出', () => desk.quit && desk.quit(), true);
+    document.body.appendChild(menu);
+    ctxMenu = menu;
+  }
+
+  els.petzone.addEventListener('contextmenu', (e) => {
+    if (e.target && e.target.closest && e.target.closest('#panel')) return;
+    e.preventDefault();
+    showCtxMenu(e.clientX, e.clientY);
+  });
+  document.addEventListener('click', hideCtxMenu);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideCtxMenu();
+    if (e.key === 'F2' && window.nurowDesktop && window.nurowDesktop.capturePet) window.nurowDesktop.capturePet();
+  });
+
   document.addEventListener('click', () => { try { ensureAudio(); } catch (e) { /* ignore */ } });
 
-  initModel();
+  loadAppearanceSettings().then(() => { initModel(); }).catch(() => { initModel(); });
   scheduleIdle();
   connect();
 })();

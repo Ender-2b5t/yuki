@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hina</title>
+<link rel="stylesheet" href="/style.css?v=20261028" />
+<style>
+  #stage { pointer-events: auto; }
+  #stage canvas { display: block; }
+
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <div id="bubble" class="hidden"><span id="bubble-text"></span></div>
+
+  <div id="panel">
+    <div id="status" title="连接状态"></div>
+    <input id="input" type="text" placeholder="和日奈说点什么…（Enter 发送）" autocomplete="off" spellcheck="false" />
+    <button id="send" title="发送">➤</button>
+    <button id="mic" title="点一下说话（再点一下结束）">🎤</button>
+    <button id="handsfree" title="免提：点一下开启后，喊「日奈」就能唤醒">👂</button>
+    <button id="settings" title="设置">⚙</button>
+    <button id="mute" title="静音 / 取消静音">🔊</button>
+  </div>
+
+<script src="/vendor/three/examples/jsm/libs/ammo.wasm.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three/build/three.module.js",
+    "three/addons/": "/vendor/three/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+// ------------------------------------------------------------------ 基础 --
+const els = {
+  stage: document.getElementById('stage'),
+  bubble: document.getElementById('bubble'),
+  bubbleText: document.getElementById('bubble-text'),
+  input: document.getElementById('input'),
+  send: document.getElementById('send'),
+  settings: document.getElementById('settings'),
+  mute: document.getElementById('mute'),
+  mic: document.getElementById('mic'),
+  handsfree: document.getElementById('handsfree'),
+  status: document.getElementById('status'),
+};
+const micState = { active: false, mode: 'push', stream: null, ctx: null, node: null, src: null };
+
+const state = {
+  model: null,
+  morphs: {},
+  blink: null,
+  eyeMorphs: null,
+  mouth: { a: null, i: null, u: null, e: null, o: null },
+  expressions: {},
+  ws: null,
+  connected: false,
+  muted: false,
+  reply: '',
+  audioCtx: null,
+  analyser: null,
+  queue: [],
+  playing: false,
+  baseY: 0,
+  bounce: 0,
+  eye: { x: 0, y: 0 },
+  look: { x: 0, y: 0 },
+  talking: 0,
+  jump: 0,
+  action: null,
+  bones: null,
+  helper: null,
+  poseBase: null,
+  restDir: null,
+  nextIdleAction: 20,
+  lastBlink: 0,
+  nextBlink: 3.0,
+};
+
+function setParam(key, value) {
+  const idx = state.morphs[key];
+  if (idx === undefined) return;
+  const arr = state.model.morphTargetInfluences;
+  if (!arr) return;
+  arr[idx] = value;
+}
+
+function pickMorph(patterns) {
+  const keys = Object.keys(state.morphs);
+  for (const pat of patterns) {
+    const hit = keys.find((k) => new RegExp(pat, 'i').test(k));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// ------------------------------------------------------------------ 3D ----
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);
+els.stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 1, 4000);
+const cam = { height: 22, dist: 46 };
+camera.position.set(0, 10.5, cam.dist);
+camera.lookAt(0, 10, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.15));
+const key = new THREE.DirectionalLight(0xffffff, 0.85);
+key.position.set(0.4, 1.2, 2.2);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xbcd0ff, 0.35);
+fill.position.set(-1.2, 0.5, 1.0);
+scene.add(fill);
+const rim = new THREE.DirectionalLight(0xffe6f0, 0.5);
+rim.position.set(0, 1.0, -1.5);
+scene.add(rim);
+
+function layout() {
+  const m = state.model;
+  if (!m) return;
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+
+async function ensureAmmo() {
+  let A = window.Ammo;
+  console.log('[hina3d] ammo initial:', typeof A, A && typeof A.then, A && A.ready ? 'has-ready' : 'no-ready');
+  for (let i = 0; i < 120; i += 1) {
+    A = window.Ammo;
+    if (A && A.btDefaultCollisionConfiguration) return A;
+    if (typeof A === 'function') {
+      try {
+        const r = A();
+        if (r && r.then) {
+          const m = await r;
+          if (m && m.btDefaultCollisionConfiguration) { window.Ammo = m; return m; }
+        }
+      } catch (e) { /* ignore */ }
+    } else if (A && typeof A.then === 'function') {
+      try {
+        const m = await A;
+        if (m && m.btDefaultCollisionConfiguration) { window.Ammo = m; return m; }
+      } catch (e) { /* ignore */ }
+    }
+    if (A && A.ready && typeof A.ready.then === 'function') {
+      try { await A.ready; } catch (e) { /* ignore */ }
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  console.log('[hina3d] ammo NOT ready; type:', typeof window.Ammo,
+    'keys:', window.Ammo ? Object.keys(window.Ammo).slice(0, 12).join(',') : 'null');
+  return null;
+}
+
+const loader = new MMDLoader();
+console.log('[hina3d] loading pmx...');
+loader.load('/models/hina3d/sorasaki/Hina1.11.pmx', async (mesh) => {
+  state.model = mesh;
+  scene.add(mesh);
+  const bbox = new THREE.Box3().setFromObject(mesh);
+  mesh.position.y = -bbox.min.y;
+  state.baseY = mesh.position.y;
+  // 按模型实际尺寸自动构图
+  const modelH = bbox.max.y - bbox.min.y;
+  const modelW = Math.max(bbox.max.x - bbox.min.x, 1);
+  const vFov = (camera.fov * Math.PI) / 180;
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const distH = (modelH / 0.94) / 2 / Math.tan(vFov / 2);
+  const distW = (modelW / 0.96) / 2 / Math.tan(hFov / 2);
+  const fitDist = Math.max(distH, distW) * 1.02;
+  camera.position.set(0, modelH * 0.52, fitDist);
+  camera.lookAt(0, modelH * 0.50, 0);
+  camera.updateProjectionMatrix();
+  console.log('[hina3d] fit h=', modelH.toFixed(1), 'w=', modelW.toFixed(1), 'dist=', fitDist.toFixed(1));
+  state.morphs = mesh.morphTargetDictionary || {};
+  const keys = Object.keys(state.morphs);
+  state.blink = pickMorph(['^bl_01$', 'bl_01', 'まばたき', 'blink']);
+  state.eyeMorphs = {
+    up: pickMorph(['eye_up', '^上$']),
+    down: pickMorph(['eye_down', '^下$']),
+    left: pickMorph(['eye_left', '^左目$']),
+    right: pickMorph(['eye_right', '^右目$']),
+  };
+  state.mouth.a = pickMorph(['v_a', 'あ$', 'mouth_a']);
+  state.mouth.i = pickMorph(['v_i', 'い$', 'mouth_i']);
+  state.mouth.u = pickMorph(['v_u', 'う$', 'mouth_u']);
+  state.mouth.e = pickMorph(['v_e', 'え$', 'mouth_e']);
+  state.mouth.o = pickMorph(['v_o', 'お$', 'mouth_o']);
+  const exprMap = {
+    happy: pickMorph(['em_happy', 'em_smile', '笑い', 'にこり', 'happy']),
+    angry: pickMorph(['em_angry', '怒り', 'angry']),
+    sad: pickMorph(['em_sad', '困る', '悲し', 'sad']),
+    surprise: pickMorph(['em_surprise', 'びっくり', '驚', 'surprise']),
+    shy: pickMorph(['em_hanme', 'hanme', 'はぅ', '照れ']),
+    smile: pickMorph(['mo_smile', 'にやり', 'にこり', 'smile']),
+  };
+  state.expressions = Object.fromEntries(Object.entries(exprMap).filter(([, v]) => v));
+  // 先分析各材质的几何范围，弄清角/光环分别在哪
+  const geo = mesh.geometry;
+  const pos = geo.attributes.position;
+  const idx = geo.index;
+  const groups = geo.groups || [];
+  const haloMatIdx = mesh.material.findIndex((mat) => /halo|光环|光環|ヘイロー/i.test(String((mat && mat.name) || '')));
+  console.log('[hina3d] haloMatIdx:', haloMatIdx);
+  // 光环默认显示；设置里关掉「显示光环」才过滤掉（角保留）
+  let showHalo = true;
+  try {
+    const sr = await fetch('/api/settings');
+    const sd = await sr.json();
+    showHalo = !(sd && sd.config && sd.config.halo === false);
+  } catch (e) { /* 默认显示 */ }
+  const CUT_Y = 17.1;
+  if (!showHalo) try {
+    const idxArr = idx.array;
+    const posArr = pos.array;
+    const newIndex = [];
+    const newGroups = [];
+    groups.forEach((g) => {
+      const kept = [];
+      for (let k = g.start; k < g.start + g.count; k += 3) {
+        const i0 = idxArr[k], i1 = idxArr[k + 1], i2 = idxArr[k + 2];
+        const cy = (posArr[i0 * 3 + 1] + posArr[i1 * 3 + 1] + posArr[i2 * 3 + 1]) / 3;
+        if (g.materialIndex === haloMatIdx && cy > CUT_Y) continue;
+        kept.push(i0, i1, i2);
+      }
+      if (kept.length) {
+        newGroups.push({ start: newIndex.length, count: kept.length, materialIndex: g.materialIndex });
+        for (let j = 0; j < kept.length; j++) newIndex.push(kept[j]);
+      }
+    });
+    geo.setIndex(newIndex);
+    geo.clearGroups();
+    newGroups.forEach((g) => geo.addGroup(g.start, g.count, g.materialIndex));
+    console.log('[hina3d] halo ring removed, tris now:', newIndex.length / 3);
+  } catch (e) {
+    console.log('[hina3d] halo filter failed:', e && e.message);
+  }
+  if (!showHalo) {
+    const haloNamed = [];
+    mesh.material.forEach((mat, i) => {
+      const name = String((mat && mat.name) || '').trim();
+      if (/^(環|刻度表)$/.test(name)) { mat.visible = false; haloNamed.push(name); }
+    });
+    if (haloNamed.length) console.log('[hina3d] halo materials hidden:', haloNamed.join(','));
+  } else {
+    console.log('[hina3d] halo shown');
+  }
+  groups.forEach((g, gi) => {
+    let minY = 1e9, maxY = -1e9, minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+    const ys = [];
+    for (let k = g.start; k < g.start + g.count; k++) {
+      const vi = idx.getX(k);
+      const x = pos.getX(vi), y = pos.getY(vi), z = pos.getZ(vi);
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      ys.push(y);
+    }
+    ys.sort((a, b) => a - b);
+    const q = (p) => ys.length ? ys[Math.floor(ys.length * p)].toFixed(2) : 'n/a';
+    console.log('[hina3d] group', gi, 'mat', g.materialIndex,
+      JSON.stringify(String((mesh.material[g.materialIndex] || {}).name || '')),
+      'tris', Math.floor(g.count / 3),
+      'x', minX.toFixed(1), maxX.toFixed(1),
+      'y', minY.toFixed(1), 'q10', q(0.1), 'q50', q(0.5), 'q90', q(0.9), maxY.toFixed(1),
+      'z', minZ.toFixed(1), maxZ.toFixed(1));
+  });
+  console.log('[hina3d] materials:', mesh.material.map((m) => m.name).join(' | '));
+  console.log('[hina3d] morphNames:', Object.keys(state.morphs).join(','));
+  try {
+    mesh.material.forEach((m, i) => {
+      const hasTex = !!(m.map && m.map.image);
+      if (i < 40) console.log('[hina3d] mat', i, m.name, 'tex:', hasTex,
+        'opacity:', m.opacity, 'transparent:', m.transparent, 'blending:', m.blending, 'side:', m.side);
+    });
+  } catch (e) { /* ignore */ }
+  console.log('[hina3d] loaded. verts:', mesh.geometry.attributes.position.count,
+    '| bones:', mesh.skeleton ? mesh.skeleton.bones.length : 0,
+    '| morphs:', keys.length,
+    '| blink:', state.blink,
+    '| mouth:', JSON.stringify(state.mouth),
+    '| expr:', JSON.stringify(state.expressions));
+  if (mesh.skeleton) {
+    console.log('[hina3d] boneNames:', mesh.skeleton.bones.map((b) => b.name).join(','));
+  }
+  // 用世界坐标把手臂从 T-pose 摆到自然下垂（手放在身前一点，避免被大衣挡住）
+  if (mesh.skeleton) {
+    const boneMap = {};
+    mesh.skeleton.bones.forEach((b) => { boneMap[b.name] = b; });
+    const B = (n) => boneMap[n] || null;
+    state.bones = {
+      neck: B('首'), head: B('頭'), spine: B('上半身'),
+      spine2: B('上半身2'), armL: B('左腕'), armR: B('右腕'),
+      elbL: B('左ひじ'), elbR: B('右ひじ'),
+      handL: B('左手首'), handR: B('右手首'), center: B('センター'),
+    };
+    mesh.updateMatrixWorld(true);
+    _aimBone('armL', 'elbL', new THREE.Vector3(0.26, -1, 0.30));
+    _aimBone('armR', 'elbR', new THREE.Vector3(-0.26, -1, 0.30));
+    _aimBone('elbL', 'handL', new THREE.Vector3(0.05, -1, 0.85));
+    _aimBone('elbR', 'handR', new THREE.Vector3(-0.05, -1, 0.85));
+    state.poseBase = {};
+    Object.keys(state.bones).forEach((k) => {
+      if (state.bones[k]) state.poseBase[k] = state.bones[k].quaternion.clone();
+    });
+    state.restDir = {
+      armL: _dirOfBones('armL', 'elbL'), armR: _dirOfBones('armR', 'elbR'),
+      elbL: _dirOfBones('elbL', 'handL'), elbR: _dirOfBones('elbR', 'handR'),
+    };
+    state.action = null;
+    state.nextIdleAction = 18 + Math.random() * 15;
+    console.log('[hina3d] natural pose applied; arms:',
+      JSON.stringify(state.restDir.armL), JSON.stringify(state.restDir.armR));
+  }
+  // MMD 物理：头发/衣摆会自然摆动
+  try {
+    const md = (mesh.geometry.userData && mesh.geometry.userData.MMD) || {};
+    const ammo = await ensureAmmo();
+    if (ammo && (md.rigidBodies || []).length) {
+      state.helper = new MMDAnimationHelper({ resetPhysicsOnLoop: false });
+      state.helper.add(mesh, { physics: true, warmup: 60 });
+      console.log('[hina3d] physics enabled, bodies:', md.rigidBodies.length);
+    } else {
+      console.log('[hina3d] physics skipped (ammo:', !!ammo, 'bodies:', (md.rigidBodies || []).length, ')');
+    }
+  } catch (e) {
+    console.log('[hina3d] physics failed:', e && e.message);
+  }
+  try {
+    const md = (mesh.geometry.userData && mesh.geometry.userData.MMD) || {};
+    console.log('[hina3d] pmd data keys:', Object.keys(md).join(','),
+      '| rigidBodies:', (md.rigidBodies || []).length,
+      '| constraints:', (md.constraints || []).length);
+  } catch (e) { console.log('[hina3d] pmd inspect failed', e && e.message); }
+  layout();
+}, undefined, (err) => console.error('[hina3d] load error:', err));
+
+// ------------------------------------------------------------ 骨骼动作 --
+const _AXIS_X = new THREE.Vector3(1, 0, 0);
+const _AXIS_Y = new THREE.Vector3(0, 1, 0);
+const _AXIS_Z = new THREE.Vector3(0, 0, 1);
+
+function _dirOfBones(keyA, keyB) {
+  const a = state.bones && state.bones[keyA];
+  const b = state.bones && state.bones[keyB];
+  if (!a || !b) return null;
+  const va = new THREE.Vector3();
+  const vb = new THREE.Vector3();
+  a.getWorldPosition(va);
+  b.getWorldPosition(vb);
+  return vb.sub(va).normalize();
+}
+
+// 把骨骼转到让子骨骼指向 target 世界方向
+function _aimBone(parentKey, childKey, target) {
+  const b = state.bones && state.bones[parentKey];
+  if (!b) return;
+  b.updateMatrixWorld(true);
+  const cur = _dirOfBones(parentKey, childKey);
+  if (!cur) return;
+  const qd = new THREE.Quaternion().setFromUnitVectors(cur, target.clone().normalize());
+  const qw = new THREE.Quaternion();
+  b.getWorldQuaternion(qw);
+  const qNew = qd.multiply(qw);
+  const pq = new THREE.Quaternion();
+  if (b.parent) b.parent.getWorldQuaternion(pq); else pq.identity();
+  b.quaternion.copy(pq.invert().multiply(qNew));
+  b.updateMatrixWorld(true);
+}
+
+// 在骨骼当前世界姿态上叠加一个世界轴旋转
+function _worldDelta(key, axis, angle) {
+  const b = state.bones && state.bones[key];
+  if (!b || !angle) return;
+  const qd = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+  const qw = new THREE.Quaternion();
+  b.getWorldQuaternion(qw);
+  const qNew = qd.multiply(qw);
+  const pq = new THREE.Quaternion();
+  if (b.parent) b.parent.getWorldQuaternion(pq); else pq.identity();
+  b.quaternion.copy(pq.invert().multiply(qNew));
+  b.updateMatrixWorld(true);
+}
+
+function _pointArm(key, childKey, target) {
+  const cur = _dirOfBones(key, childKey);
+  if (!cur) return;
+  const qd = new THREE.Quaternion().setFromUnitVectors(cur, target.clone().normalize());
+  const b = state.bones[key];
+  const qw = new THREE.Quaternion();
+  b.getWorldQuaternion(qw);
+  const qNew = qd.multiply(qw);
+  const pq = new THREE.Quaternion();
+  if (b.parent) b.parent.getWorldQuaternion(pq); else pq.identity();
+  b.quaternion.copy(pq.invert().multiply(qNew));
+  b.updateMatrixWorld(true);
+}
+
+function _resetBones() {
+  if (!state.poseBase) return;
+  Object.keys(state.poseBase).forEach((k) => {
+    const b = state.bones[k];
+    if (b) b.quaternion.copy(state.poseBase[k]);
+  });
+  if (state.model) state.model.updateMatrixWorld(true);
+}
+
+const ACTIONS = {
+  wave: 2.2,
+  nod: 1.2,
+  shake: 1.4,
+  bow: 1.5,
+  tilt: 1.2,
+};
+
+function playAction(name) {
+  if (!ACTIONS[name]) return;
+  state.action = { name, t: 0, dur: ACTIONS[name] };
+}
+
+function updateAction(dt) {
+  const a = state.action;
+  if (!a) return;
+  a.t += dt;
+  const p = Math.min(1, a.t / a.dur);
+  const ease = p < 0.18 ? p / 0.18 : p > 0.82 ? (1 - p) / 0.18 : 1;
+  if (a.name === 'wave') {
+    // 右手向右上方抬起并摇摆
+    _pointArm('armR', 'elbR', new THREE.Vector3(-0.85, 0.55, 0.15).normalize());
+    _worldDelta('elbR', _AXIS_Z, Math.sin(p * Math.PI * 9) * 0.35 * ease);
+    _worldDelta('spine', _AXIS_Z, -0.04 * ease);
+    if (p > 0.1 && p < 0.2) pickExpr('happy');
+  } else if (a.name === 'nod') {
+    _worldDelta('head', _AXIS_X, Math.sin(p * Math.PI * 2) * 0.22 * ease);
+  } else if (a.name === 'shake') {
+    _worldDelta('head', _AXIS_Y, Math.sin(p * Math.PI * 4) * 0.30 * ease);
+  } else if (a.name === 'bow') {
+    _worldDelta('spine', _AXIS_X, Math.sin(p * Math.PI) * 0.30 * ease);
+    _worldDelta('head', _AXIS_X, Math.sin(p * Math.PI) * 0.12 * ease);
+  } else if (a.name === 'tilt') {
+    _worldDelta('head', _AXIS_Z, Math.sin(p * Math.PI) * 0.20 * ease);
+    _worldDelta('neck', _AXIS_Z, Math.sin(p * Math.PI) * 0.08 * ease);
+  }
+  if (p >= 1) state.action = null;
+}
+
+// 让模型面向鼠标方向（用眼睛 morph + 轻微身体转动）
+function updateLook(dt) {
+  const m = state.model;
+  if (!m) return;
+  const k = 1 - Math.exp(-dt / 0.12);
+  state.look.x += (state.eye.x - state.look.x) * k;
+  state.look.y += (state.eye.y - state.look.y) * k;
+  // 眼睛 morph
+  const em = state.eyeMorphs || {};
+  const eyeLeft = state.morphs[em.left];
+  const eyeRight = state.morphs[em.right];
+  const eyeUp = state.morphs[em.up];
+  const eyeDown = state.morphs[em.down];
+  if (state.model.morphTargetInfluences) {
+    const arr = state.model.morphTargetInfluences;
+    if (eyeLeft !== undefined) arr[eyeLeft] = Math.max(0, -state.look.x);
+    if (eyeRight !== undefined) arr[eyeRight] = Math.max(0, state.look.x);
+    if (eyeUp !== undefined) arr[eyeUp] = Math.max(0, -state.look.y);
+    if (eyeDown !== undefined) arr[eyeDown] = Math.max(0, state.look.y);
+  }
+  m.rotation.y = state.look.x * 0.12;
+  m.rotation.x = state.look.y * 0.04;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, animateClock.getDelta());
+  const t = animateClock.elapsedTime;
+  const m = state.model;
+  if (m) {
+    updateLook(dt);
+    // 呼吸 + 轻微摇摆
+    const bob = Math.sin(t * 1.7) * 0.05;
+    m.position.y = state.baseY + bob;
+    // 先回到自然站姿，再叠加小动作
+    _resetBones();
+    const lookX = state.look.x;
+    const lookY = state.look.y;
+    _worldDelta('neck', _AXIS_Y, lookX * 0.14);
+    _worldDelta('neck', _AXIS_X, -lookY * 0.06);
+    _worldDelta('head', _AXIS_Y, lookX * 0.16);
+    _worldDelta('head', _AXIS_X, -lookY * 0.07);
+    _worldDelta('head', _AXIS_Z, -lookX * 0.04);
+    _worldDelta('spine', _AXIS_Z, Math.sin(t * 0.9) * 0.012);
+    _worldDelta('spine2', _AXIS_X, Math.sin(t * 1.7) * 0.012);
+    _worldDelta('armL', _AXIS_Z, Math.sin(t * 1.5) * 0.015);
+    _worldDelta('armR', _AXIS_Z, -Math.sin(t * 1.5) * 0.015);
+    updateAction(dt);
+    if (state.helper) state.helper.update(dt);
+    // 随机小动作
+    if (!state.action) {
+      state.nextIdleAction -= dt;
+      if (state.nextIdleAction <= 0) {
+        state.nextIdleAction = 20 + Math.random() * 20;
+        playAction(['nod', 'tilt', 'nod', 'tilt'][Math.floor(Math.random() * 4)]);
+      }
+    }
+    // 跳跃
+    if (state.jump > 0) {
+      state.jump = Math.max(0, state.jump - dt * 1.8);
+      m.position.y += Math.sin(state.jump * Math.PI) * 1.6;
+    }
+    if (state.bounce > 0) {
+      state.bounce = Math.max(0, state.bounce - dt * 2.2);
+      m.position.y += Math.sin(state.bounce * Math.PI) * 0.35;
+    }
+    // 眨眼
+    state.nextBlink -= dt;
+    if (state.nextBlink <= 0) {
+      if (state.blink !== null) {
+        const idx = state.morphs[state.blink];
+        const arr = m.morphTargetInfluences;
+        if (idx !== undefined) arr[idx] = 0.9;
+        setTimeout(() => {
+          if (state.model && state.model.morphTargetInfluences && idx !== undefined) {
+            state.model.morphTargetInfluences[idx] = 0;
+          }
+        }, 110);
+      }
+      state.nextBlink = 3 + Math.random() * 4;
+    }
+    // 说话口型（有音频时用音量）
+    if (state.playing && state.analyser) {
+      const arrAudio = new Uint8Array(state.analyser.fftSize);
+      state.analyser.getByteTimeDomainData(arrAudio);
+      let sum = 0;
+      for (let i = 0; i < arrAudio.length; i++) {
+        const v = (arrAudio[i] - 128) / 128;
+        sum += v * v;
+      }
+      const amp = Math.min(1, Math.sqrt(sum / arrAudio.length) * 3.0);
+      state.talking += (amp - state.talking) * (amp > state.talking ? 0.6 : 0.2);
+      if (state.mouth.a !== null) setParam(state.mouth.a, state.talking);
+    } else if (state.talking > 0.01) {
+      state.talking *= 0.85;
+      if (state.mouth.a !== null) setParam(state.mouth.a, state.talking);
+    }
+  }
+  renderer.render(scene, camera);
+}
+const animateClock = new THREE.Clock();
+animate();
+
+// ------------------------------------------------------------------ UI ----
+function setBubble(text, thinking = false, timeout = 0) {
+  if (!text && !thinking) {
+    els.bubble.classList.add('hidden');
+    els.bubble.classList.remove('show', 'thinking');
+    return;
+  }
+  els.bubbleText.textContent = text || '';
+  els.bubble.classList.remove('hidden');
+  els.bubble.classList.toggle('thinking', !!thinking);
+  void els.bubble.offsetWidth;
+  els.bubble.classList.add('show');
+  clearTimeout(setBubble._t);
+  if (timeout) {
+    setBubble._t = setTimeout(() => {
+      els.bubble.classList.remove('show');
+    }, timeout);
+  }
+}
+
+function setConnected(ok) {
+  state.connected = ok;
+  els.status.classList.toggle('on', ok);
+}
+
+function setMuted(v) {
+  state.muted = v;
+  els.mute.textContent = v ? '🔇' : '🔊';
+}
+
+function pickExpr(kind) {
+  const key = state.expressions[kind];
+  if (!key) return;
+  const idx = state.morphs[key];
+  if (idx === undefined) return;
+  const arr = state.model.morphTargetInfluences;
+  arr[idx] = 1;
+  setTimeout(() => { if (state.model) state.model.morphTargetInfluences[idx] = 0; }, 1600);
+}
+
+function reactClick(x, y) {
+  const h = window.innerHeight;
+  const part = y < h * 0.42 ? 'head' : 'body';
+  state.bounce = 1;
+  if (part === 'head') {
+    pickExpr('shy');
+  } else {
+    pickExpr('smile');
+    if (Math.random() < 0.6) playAction(['nod', 'shake', 'bow', 'tilt'][Math.floor(Math.random() * 4)]);
+  }
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: 'react', part }));
+  }
+}
+
+// 鼠标追踪视线
+document.addEventListener('mousemove', (e) => {
+  const nx = (e.clientX / window.innerWidth) * 2 - 1;
+  const ny = (e.clientY / window.innerHeight) * 2 - 1;
+  state.eye.x = Math.max(-1, Math.min(1, nx));
+  state.eye.y = Math.max(-1, Math.min(1, ny));
+});
+if (window.nurowDesktop && window.nurowDesktop.onCursor) {
+  window.nurowDesktop.onCursor((pt) => {
+    const nx = (pt.x / window.innerWidth) * 2 - 1;
+    const ny = (pt.y / window.innerHeight) * 2 - 1;
+    state.eye.x = Math.max(-1, Math.min(1, nx * 1.2));
+    state.eye.y = Math.max(-1, Math.min(1, ny * 1.2));
+  });
+}
+
+// 拖动窗口 + 点击互动
+let downAt = null;
+let moved = false;
+els.stage.addEventListener('dblclick', () => { playAction('wave'); pickExpr('happy'); });
+els.stage.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  downAt = { x: e.screenX, y: e.screenY };
+  moved = false;
+  if (window.nurowDesktop && window.nurowDesktop.startDrag) window.nurowDesktop.startDrag();
+});
+document.addEventListener('mousemove', (e) => {
+  if (!downAt) return;
+  if (Math.hypot(e.screenX - downAt.x, e.screenY - downAt.y) > 6) moved = true;
+});
+let clickTimer = 0;
+document.addEventListener('mouseup', (e) => {
+  if (!downAt) return;
+  downAt = null;
+  if (window.nurowDesktop && window.nurowDesktop.endDrag) window.nurowDesktop.endDrag();
+  if (moved) return;
+  if (clickTimer) {
+    clearTimeout(clickTimer);
+    clickTimer = 0;
+    playAction('wave');
+    pickExpr('happy');
+    setBubble('（挥手）', false, 1200);
+    return;
+  }
+  const x = e.clientX;
+  const y = e.clientY;
+  clickTimer = setTimeout(() => {
+    clickTimer = 0;
+    reactClick(x, y);
+  }, 240);
+});
+
+// 输入框 / 按钮
+function sendChat() {
+  const text = els.input.value.trim();
+  if (!text) return;
+  els.input.value = '';
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: 'chat', text }));
+  } else {
+    setBubble('（还没连上，等一下）', false, 2000);
+  }
+}
+els.send.addEventListener('click', sendChat);
+els.mic.addEventListener('click', toggleMic);
+els.handsfree.addEventListener('click', toggleHandsfree);
+els.input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+});
+els.settings.addEventListener('click', () => {
+  if (window.nurowDesktop && window.nurowDesktop.openSettings) window.nurowDesktop.openSettings();
+});
+els.mute.addEventListener('click', () => {
+  const v = !state.muted;
+  setMuted(v);
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: 'mute', value: v }));
+  }
+});
+
+// ------------------------------------------------------------------- mic --
+function pcmToB64(i16) {
+  const bytes = new Uint8Array(i16.buffer);
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function startMic(mode) {
+  if (micState.active) stopMic();
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    setBubble('（还没连上，等一下再说话）', false, 2500);
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const node = ctx.createScriptProcessor(2048, 1, 1);
+    micState.active = true;
+    micState.mode = mode;
+    node.onaudioprocess = (ev) => {
+      if (!micState.active) return;
+      const f32 = ev.inputBuffer.getChannelData(0);
+      const i16 = new Int16Array(f32.length);
+      for (let i = 0; i < f32.length; i += 1) {
+        const v = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+      }
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        const payload = { type: 'audio_in', data: pcmToB64(i16), sampleRate: ctx.sampleRate };
+        if (mode === 'wake') payload.mode = 'wake';
+        state.ws.send(JSON.stringify(payload));
+      }
+    };
+    src.connect(node);
+    node.connect(ctx.destination);
+    micState.stream = stream;
+    micState.ctx = ctx;
+    micState.node = node;
+    micState.src = src;
+    if (mode === 'wake') {
+      state.ws.send(JSON.stringify({ type: 'wake_start', sampleRate: ctx.sampleRate }));
+      els.handsfree.classList.add('handsfree-on');
+      setBubble('免提开着啦～喊我「日奈」就行', false, 4000);
+    } else {
+      state.ws.send(JSON.stringify({ type: 'audio_start', sampleRate: ctx.sampleRate }));
+      els.mic.classList.add('recording');
+      setBubble('我在听…', false);
+    }
+    console.log('[hina3d] mic started', mode, ctx.sampleRate);
+  } catch (err) {
+    console.warn('[hina3d] mic failed', err);
+    setBubble('（麦克风打不开：' + (err && err.message ? err.message : String(err)) + '）', false, 5000);
+  }
+}
+
+function stopMic() {
+  if (!micState.active) return;
+  const mode = micState.mode;
+  micState.active = false;
+  try {
+    if (micState.node) micState.node.disconnect();
+    if (micState.src) micState.src.disconnect();
+    if (micState.stream) micState.stream.getTracks().forEach((t) => t.stop());
+    if (micState.ctx) micState.ctx.close();
+  } catch (e) { /* ignore */ }
+  micState.stream = null;
+  micState.ctx = null;
+  micState.node = null;
+  micState.src = null;
+  els.mic.classList.remove('recording');
+  els.handsfree.classList.remove('handsfree-on');
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ type: mode === 'wake' ? 'wake_stop' : 'audio_end' }));
+  }
+}
+
+function toggleMic() {
+  if (micState.active && micState.mode === 'push') stopMic();
+  else startMic('push');
+}
+
+function toggleHandsfree() {
+  if (micState.active && micState.mode === 'wake') stopMic();
+  else startMic('wake');
+}
+
+// ------------------------------------------------------------------ audio --
+function ensureAudio() {
+  if (!state.audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    state.audioCtx = new AC();
+    state.analyser = state.audioCtx.createAnalyser();
+    state.analyser.fftSize = 512;
+    state.analyser.connect(state.audioCtx.destination);
+  }
+  if (state.audioCtx.state === 'suspended') state.audioCtx.resume().catch(() => {});
+  return state.audioCtx;
+}
+
+async function enqueueAudioB64(b64) {
+  const ctx = ensureAudio();
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    let buffer;
+    try {
+      buffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+    } catch (e) {
+      const fmt = 'audio/wav';
+      buffer = await new Response(new Blob([bytes], { type: fmt })).arrayBuffer().then((ab) => ctx.decodeAudioData(ab));
+    }
+    state.queue.push(buffer);
+    drainAudio();
+  } catch (e) { console.warn('[hina3d] decode audio failed', e); }
+}
+
+function drainAudio() {
+  if (state.playing || !state.queue.length) return;
+  const ctx = state.audioCtx;
+  if (!ctx) return;
+  const buffer = state.queue.shift();
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(state.analyser);
+  if (!state.muted) src.connect(ctx.destination);
+  state.playing = true;
+  src.onended = () => { state.playing = false; drainAudio(); };
+  src.start();
+}
+document.addEventListener('click', () => { try { ensureAudio(); } catch (e) { /* ignore */ } });
+
+// ------------------------------------------------------------------- WS ---
+let reconnectTimer = 0;
+function connect() {
+  clearTimeout(reconnectTimer);
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  let ws;
+  try { ws = new WebSocket(proto + '://' + location.host + '/ws'); } catch (e) { reconnectTimer = setTimeout(connect, 1500); return; }
+  state.ws = ws;
+  ws.onopen = () => { console.log('[hina3d] ws open'); setConnected(true); };
+  ws.onmessage = (ev) => {
+    let msg = null;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    handleMessage(msg);
+  };
+  ws.onclose = () => { setConnected(false); reconnectTimer = setTimeout(connect, 1500); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'hello':
+      if (msg.persona && msg.persona.greeting) setBubble(msg.persona.greeting, false, 12000);
+      break;
+    case 'start':
+      state.reply = '';
+      setBubble('', true);
+      break;
+    case 'delta':
+      state.reply += msg.text || '';
+      setBubble(state.reply, true);
+      break;
+    case 'done':
+      setBubble(state.reply || '……', false, 9000);
+      if (/嘿嘿|好耶|开心|喜欢/.test(state.reply)) pickExpr('happy');
+      else if (/哼|才不|讨厌/.test(state.reply)) pickExpr('shy');
+      break;
+    case 'audio':
+      enqueueAudioB64(msg.data);
+      break;
+    case 'react_text':
+      setBubble(msg.text || '', false, 3500);
+      break;
+    case 'info':
+      setBubble(msg.text || '', false, 4000);
+      break;
+    case 'tool_call':
+      setBubble('（正在' + (msg.name === 'open_app' ? '打开软件' : '处理') + '…）', false, 2200);
+      break;
+    case 'muted':
+      setMuted(!!msg.value);
+      break;
+    case 'stt_state':
+      if (msg.state === 'listening') setBubble('我在听…', false);
+      else if (msg.state === 'idle' && !state.reply) els.bubble.classList.remove('show');
+      break;
+    case 'stt_partial':
+      setBubble('🎤 ' + (msg.text || ''), false);
+      break;
+    case 'stt_final':
+      setBubble('🎤 ' + (msg.text || ''), false, 1500);
+      break;
+    case 'user_text':
+      setBubble('你：' + (msg.text || ''), false, 1600);
+      break;
+    case 'wake':
+      if (msg.state === 'armed') setBubble('免提开着：喊「日奈」叫我', false, 3000);
+      else if (msg.state === 'triggered') setBubble('我在～', false, 2500);
+      else if (msg.state === 'off') setBubble('免提关啦', false, 1500);
+      break;
+    case 'settings_changed':
+      setBubble('（设置更新啦）', false, 1500);
+      setTimeout(() => window.location.reload(), 700);
+      break;
+    default:
+      break;
+  }
+}
+
+connect();
+window.addEventListener('resize', layout);
+</script>
+</body>
+</html>

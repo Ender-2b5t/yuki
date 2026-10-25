@@ -62,6 +62,21 @@ PERSONA_DARK = _load_json(SERVER / "persona_dark.json", {})
 PERSONA_STATE = DATA / "persona_state.json"
 
 
+def _apply_avatar_name(p: dict) -> dict:
+    """Hina 3D 模式下名字/自称改为「日奈」。"""
+    try:
+        if str((CONFIG or {}).get("avatar") or "yuki") == "hina3d":
+            p = dict(p)
+            p["display_name"] = "日奈"
+            system = str(p.get("system") or "")
+            p["system"] = system.replace("yuki", "日奈").replace("Yuki", "日奈")
+            greeting = str(p.get("greeting") or "")
+            p["greeting"] = greeting.replace("yuki", "日奈").replace("Yuki", "日奈")
+    except Exception:
+        pass
+    return p
+
+
 def active_persona() -> dict:
     """当前人格（normal / dark）。"""
     mode = "normal"
@@ -73,10 +88,10 @@ def active_persona() -> dict:
         merged = dict(PERSONA)
         merged.update(PERSONA_DARK)
         merged["mode"] = "dark"
-        return merged
+        return _apply_avatar_name(merged)
     merged = dict(PERSONA)
     merged["mode"] = "normal"
-    return merged
+    return _apply_avatar_name(merged)
 
 
 def current_voice() -> tuple[str, str, str]:
@@ -420,7 +435,7 @@ async def awareness_loop() -> None:
             title_now = (info.get("title") or "").strip()
             if (
                 SCREEN_COMMENT
-                and now - _last_screen_check_at > 12.0
+                and now - _last_screen_check_at > max(1.5, min(12.0, SCREEN_COMMENT_COOLDOWN))
                 and now - _last_screen_comment_at > SCREEN_COMMENT_COOLDOWN
                 and idle < 120
                 and proc_name not in ("electron.exe", "python.exe", "pythonw.exe", "code.exe")
@@ -495,11 +510,26 @@ def memory_notes() -> str:
 def build_messages(text: str, extra_system: str = "") -> list[dict]:
     msgs: list[dict] = [{"role": "system", "content": active_persona().get("system", "")}]
     notes = memory_notes()
+    is_hina = str((CONFIG or {}).get("avatar") or "yuki") == "hina3d"
+    if is_hina:
+        notes = notes.replace("yuki", "日奈").replace("Yuki", "日奈")
+        msgs.append(
+            {
+                "role": "system",
+                "content": "（现在你以「日奈」的形态陪伴主人：名字叫日奈，记忆和聊天记录里出现的 yuki 也是你，只是换了名字和样子。别人问名字时回答日奈。）",
+            }
+        )
     if notes:
         msgs.append({"role": "system", "content": "【关于主人的长期记忆】\n" + notes})
     if extra_system:
         msgs.append({"role": "system", "content": extra_system})
-    msgs.extend(recent_messages(HISTORY_TURNS))
+    history = recent_messages(HISTORY_TURNS)
+    if is_hina:
+        for m in history:
+            content = m.get("content")
+            if content:
+                m["content"] = content.replace("yuki", "日奈").replace("Yuki", "日奈")
+    msgs.extend(history)
     msgs.append({"role": "user", "content": text})
     return msgs
 
@@ -510,7 +540,8 @@ TOOL_HINT = (
     "- 操作：mouse_move 移动鼠标、mouse_click 点击、mouse_scroll 滚动、mouse_drag 拖拽、"
     "type_text 打字、press_keys 快捷键、activate_window 切到某个窗口、clipboard_read/write 读写剪贴板\n"
     "- 系统：set_volume 调音量、mute_volume 静音、press_media_key 媒体键、set_timer 提醒、"
-    "take_screenshot 截屏、get_time 时间、lock_pc 锁屏、write_memo 记笔记、wait_seconds 等界面加载\n"
+    "take_screenshot 截屏、get_time 时间、get_system_info 电脑状态（电量/内存/磁盘/分辨率）、"
+    "lock_pc 锁屏、write_memo 记笔记、wait_seconds 等界面加载\n"
     "- 看：look_screen 截图并读屏幕文字（知道你屏幕上有什么）；sing 唱歌。\n"
     "【任务规则】\n"
     "1) 主人交代电脑上的任务时，直接动手：按顺序调用工具，一步一步做完，不要只描述步骤、不要问「需要我帮你吗」。\n"
@@ -748,6 +779,7 @@ class Session:
 # 小模型经常把「yuki」听成「有姬/尤琪」等等，所以用模糊匹配
 _WAKE_FUZZY = re.compile(r"[有尤悠由][姬琪奇基纪琦旗齐]|雪")
 _WAKE_EN = ("yuki", "yuk1", "yu ki", "youki")
+_WAKE_HINA = ("日奈", "日乃", "日菜", "希娜", "阳奈", "hina", "ひな")
 
 
 def _has_wake(text: str) -> bool:
@@ -756,6 +788,9 @@ def _has_wake(text: str) -> bool:
         return False
     if any(w in t for w in _WAKE_EN):
         return True
+    if str((CONFIG or {}).get("avatar") or "yuki") == "hina3d":
+        if any(w in t for w in _WAKE_HINA):
+            return True
     return bool(_WAKE_FUZZY.search(t))
 
 
@@ -918,11 +953,53 @@ def _forced_action(t: str):
     return None
 
 
+async def _quick_local_answer(text: str) -> str | None:
+    """时间和电脑状态这类问题本地秒回，不走大模型（快、免费、不会说错时间）。"""
+    t = (text or "").strip()
+    if not t or len(t) > 40:
+        return None
+    now = time.localtime()
+    hm = f"{now.tm_hour:02d}:{now.tm_min:02d}"
+    week = "一二三四五六日"[now.tm_wday]
+    if any(k in t for k in ("现在几点", "几点了", "现在时间", "当前时间", "现在是什么时间")) and not any(
+        k in t for k in ("提醒", "闹钟", "定时")
+    ):
+        return f"现在 {hm} 啦～"
+    if any(k in t for k in ("今天几号", "几月几号", "今天日期", "今天周几", "今天星期几")):
+        return f"今天是 {now.tm_mon} 月 {now.tm_mday} 日，星期{week} 哦～"
+    if any(
+        k in t
+        for k in (
+            "系统状态", "电脑状态", "内存", "CPU", "cpu", "磁盘", "硬盘", "剩余空间",
+            "电量", "电池", "多少电", "有电", "电源", "屏幕分辨率", "分辨率",
+        )
+    ):
+        info = await tools_mod.execute_tool("get_system_info", {}, {})
+        return "我看了一下哦：\n" + str(info)
+    return None
+
+
 async def handle_chat(session: Session, text: str) -> None:
     global LAST_USER_AT
     LAST_USER_AT = time.time()
     if session.busy:
         await session.send({"type": "info", "text": "（我正在说话呢，等我一下）"})
+        return
+    quick = await _quick_local_answer(text)
+    if quick is not None:
+        session.busy = True
+        try:
+            save_message("user", text)
+            save_message("assistant", quick)
+            await session.send({"type": "start"})
+            await session.send({"type": "delta", "text": quick})
+            await session.send({"type": "done", "text": quick})
+            update_state_on_chat()
+            if VOICE_ENABLED:
+                await session.speak(quick)
+            asyncio.create_task(maybe_summarize())
+        finally:
+            session.busy = False
         return
     session.busy = True
     queue: asyncio.Queue = asyncio.Queue()
@@ -1416,6 +1493,18 @@ async def api_settings_get():
             "proactive": PROACTIVE_ENABLED,
             "screen_comment": SCREEN_COMMENT,
             "screen_comment_cooldown": SCREEN_COMMENT_COOLDOWN,
+            "avatar": str(CONFIG.get("avatar") or "yuki"),
+            "halo": bool(CONFIG.get("halo", True)),
+            "yuki_outfit": str(CONFIG.get("yuki_outfit") or ""),
+            "yuki_expressions": list(CONFIG.get("yuki_expressions") or []),
+            "idle_level": str(CONFIG.get("idle_level") or "normal"),
+            "talk_flap": bool(CONFIG.get("talk_flap", True)),
+            "always_on_top": bool(CONFIG.get("always_on_top", True)),
+            "auto_start": bool(CONFIG.get("auto_start", False)),
+            "click_react": bool(CONFIG.get("click_react", True)),
+            "gaze_follow": bool(CONFIG.get("gaze_follow", True)),
+            "gaze_speed": str(CONFIG.get("gaze_speed") or "fast"),
+            "idle_actions": bool(CONFIG.get("idle_actions", True)),
             "proactive_minutes": round(PROACTIVE_AFTER / 60.0, 1),
             "wake_autostart": bool(CONFIG.get("wake_autostart", False)),
             "api_key_set": bool(API_KEY),
@@ -1454,12 +1543,13 @@ async def api_settings_save(payload: dict | None = None):
 
     # 2) 开关 / key / 间隔
     cfg = _load_json(SERVER / "config.json", {})
-    for key in ("auto_greet", "voice_enabled", "tools_enabled", "awareness", "proactive", "screen_comment", "wake_autostart"):
+    for key in ("auto_greet", "voice_enabled", "tools_enabled", "awareness", "proactive", "screen_comment", "wake_autostart",
+                "always_on_top", "auto_start", "click_react", "gaze_follow", "idle_actions"):
         if key in payload:
             cfg[key] = bool(payload[key])
     if "screen_comment_cooldown" in payload:
         try:
-            cfg["screen_comment_cooldown"] = max(15.0, float(payload["screen_comment_cooldown"]))
+            cfg["screen_comment_cooldown"] = max(1.0, min(120.0, float(payload["screen_comment_cooldown"])))
         except Exception:
             pass
     if "proactive_minutes" in payload:
@@ -1467,6 +1557,31 @@ async def api_settings_save(payload: dict | None = None):
             cfg["proactive_after_sec"] = max(60.0, float(payload["proactive_minutes"]) * 60.0)
         except Exception:
             pass
+    avatar = str(payload.get("avatar") or "").strip()
+    if avatar in ("yuki", "hina3d"):
+        cfg["avatar"] = avatar
+    if "halo" in payload:
+        cfg["halo"] = bool(payload["halo"])
+    exprs = payload.get("yuki_expressions")
+    if isinstance(exprs, list):
+        clean = []
+        for x in exprs[:40]:
+            x = str(x).strip()
+            if re.match(r"^expr_\d{2}$", x) and x not in clean:
+                clean.append(x)
+        cfg["yuki_expressions"] = clean
+    outfit = str(payload.get("yuki_outfit") or "").strip()
+    if outfit in ("", "scarf", "sweater", "cat", "glasses", "ears", "tail", "hat",
+                  "eyeshadow", "fringe", "bun", "longhair"):
+        cfg["yuki_outfit"] = outfit
+    idle_level = str(payload.get("idle_level") or "").strip()
+    if idle_level in ("quiet", "normal", "lively"):
+        cfg["idle_level"] = idle_level
+    if "talk_flap" in payload:
+        cfg["talk_flap"] = bool(payload["talk_flap"])
+    gaze_speed = str(payload.get("gaze_speed") or "").strip()
+    if gaze_speed in ("fast", "slow"):
+        cfg["gaze_speed"] = gaze_speed
     api_key = str(payload.get("api_key") or "").strip()
     if api_key and "…" not in api_key and api_key.startswith("sk-"):
         cfg["api_key"] = api_key

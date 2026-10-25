@@ -35,6 +35,22 @@ app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 
 const DATA_DIR = path.join(BASE, 'data');
 const LOG_DIR = path.join(DATA_DIR, 'logs');
+const WINDOW_STATE = path.join(DATA_DIR, 'window.json');
+
+function loadWindowState() {
+  try {
+    const st = JSON.parse(fs.readFileSync(WINDOW_STATE, 'utf8'));
+    if (typeof st.x === 'number' && typeof st.y === 'number') return st;
+  } catch (_) { /* 没有就用默认 */ }
+  return null;
+}
+
+function saveWindowState(bounds) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(WINDOW_STATE, JSON.stringify({ x: bounds.x, y: bounds.y }), 'utf8');
+  } catch (_) { /* ignore */ }
+}
 const PORT = Number(process.env.NUROW_PORT || 8765);
 const APP_URL = `http://127.0.0.1:${PORT}/`;
 
@@ -73,6 +89,50 @@ function pyExe() {
   if (fs.existsSync(py)) return py;
   return 'python';
 }
+
+// 读取服务端配置（窗口相关设置用）
+function serverConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(BASE, 'server', 'config.json'), 'utf8')) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+// 应用窗口相关设置：置顶 / 开机自启
+function applyWindowSettings() {
+  const cfg = serverConfig();
+  const onTop = cfg.always_on_top !== false;
+  if (win && !win.isDestroyed()) win.setAlwaysOnTop(onTop, 'floating');
+  try {
+    setCursorInterval(cfg.gaze_speed === 'slow' ? 70 : 30);
+  } catch (_) { /* ignore */ }
+  try {
+    const autoStart = cfg.auto_start === true;
+    const launcher = path.join(BASE, 'yuki.exe');
+    if (fs.existsSync(launcher)) {
+      app.setLoginItemSettings({ openAtLogin: autoStart, path: launcher, args: [] });
+    } else {
+      app.setLoginItemSettings({ openAtLogin: autoStart, path: process.execPath, args: ['--no-sandbox', BASE] });
+    }
+    logLine('window settings applied: onTop=', onTop, 'autoStart=', autoStart);
+  } catch (e) {
+    logLine('apply window settings failed:', e && e.message);
+  }
+  refreshTrayMenu();
+}
+
+// 根据 config.json 里的 avatar 选择渲染页：yuki(Live2D) / hina3d(MMD 3D)
+function avatarPage() {
+  if (process.env.NUROW_START_PAGE !== undefined) return process.env.NUROW_START_PAGE;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(BASE, 'server', 'config.json'), 'utf8'));
+    return cfg.avatar === 'hina3d' ? 'hina3d.html' : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 
 function openSettings() {
   if (settingsWin && !settingsWin.isDestroyed()) {
@@ -119,17 +179,24 @@ function startServer() {
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 let cursorTimer = null;
+let cursorIntervalMs = 30;
+function broadcastCursor() {
+  try {
+    if (!win || win.isDestroyed() || !win.isVisible()) return;
+    if (!win.webContents || win.webContents.isDestroyed()) return;
+    const p = screen.getCursorScreenPoint();
+    const b = win.getBounds();
+    win.webContents.send('cursor', { x: p.x - b.x, y: p.y - b.y, sx: p.x, sy: p.y });
+  } catch (_) { /* ignore */ }
+}
+function setCursorInterval(ms) {
+  cursorIntervalMs = ms;
+  if (cursorTimer) { clearInterval(cursorTimer); cursorTimer = null; }
+  cursorTimer = setInterval(broadcastCursor, cursorIntervalMs);
+}
 function startCursorBroadcast() {
   if (cursorTimer) return;
-  cursorTimer = setInterval(() => {
-    try {
-      if (!win || win.isDestroyed() || !win.isVisible()) return;
-      if (!win.webContents || win.webContents.isDestroyed()) return;
-      const p = screen.getCursorScreenPoint();
-      const b = win.getBounds();
-      win.webContents.send('cursor', { x: p.x - b.x, y: p.y - b.y, sx: p.x, sy: p.y });
-    } catch (_) { /* ignore */ }
-  }, 70);
+  setCursorInterval(cursorIntervalMs);
 }
 
 function httpJson(pathname) {
@@ -186,20 +253,27 @@ function apiPost(pathname, payload) {
 
 function createWindow() {
   const wa = screen.getPrimaryDisplay().workArea;
+  const cfg0 = serverConfig();
+  const onTop = cfg0.always_on_top !== false;
   const width = 380;
   const height = Math.min(700, Math.max(520, wa.height - 80));
+  const savedPos = loadWindowState();
+  const pos = savedPos && screen.getAllDisplays().some((d) => {
+    const a = d.workArea;
+    return savedPos.x >= a.x - 50 && savedPos.x < a.x + a.width - 100 && savedPos.y >= a.y - 50 && savedPos.y < a.y + a.height - 100;
+  }) ? { x: savedPos.x, y: savedPos.y } : { x: wa.x + wa.width - width - 18, y: wa.y + wa.height - height - 10 };
   win = new BrowserWindow({
     width,
     height,
-    x: wa.x + wa.width - width - 18,
-    y: wa.y + wa.height - height - 10,
+    x: pos.x,
+    y: pos.y,
     transparent: true,
     frame: false,
     resizable: false,
     maximizable: false,
     minimizable: false,
     fullscreenable: false,
-    alwaysOnTop: true,
+    alwaysOnTop: onTop,
     skipTaskbar: true,
     hasShadow: false,
     title: 'yuki',
@@ -211,16 +285,26 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
-  win.setAlwaysOnTop(true, 'floating');
+  win.setAlwaysOnTop(onTop, 'floating');
+  let moveSaveTimer = null;
+  const rememberBounds = () => {
+    clearTimeout(moveSaveTimer);
+    moveSaveTimer = setTimeout(() => {
+      try { saveWindowState(win.getBounds()); } catch (_) {}
+    }, 500);
+  };
+  win.on('move', rememberBounds);
+  win.on('moved', rememberBounds);
   win.setMenuBarVisibility(false);
   win.webContents.on('console-message', (event, level, message, line, sourceId) => {
     logLine('renderer:', message, sourceId ? '(' + sourceId + ':' + line + ')' : '');
   });
   win.webContents.on('did-finish-load', () => logLine('page loaded ok'));
-  win.loadURL(APP_URL);
+  const startPage = avatarPage();
+  win.loadURL(APP_URL + startPage);
   win.webContents.on('did-fail-load', () => {
     logLine('page load failed, retrying...');
-    if (!quitting) setTimeout(() => { try { win && win.loadURL(APP_URL); } catch (_) {} }, 1500);
+    if (!quitting) setTimeout(() => { try { win && win.loadURL(APP_URL + startPage); } catch (_) {} }, 1500);
   });
   win.once('ready-to-show', () => {
     win.show();
@@ -266,10 +350,18 @@ function createWindow() {
 function createTray() {
   let icon = nativeImage.createEmpty();
   try {
-    const p = path.join(BASE, 'assets', 'icon.png');
-    if (fs.existsSync(p)) {
+    const candidates = [
+      path.join(BASE, 'web', 'yuki_tray_32.png'),
+      path.join(BASE, 'web', 'yuki_tray.png'),
+      path.join(BASE, 'assets', 'icon.png'),
+    ];
+    for (const p of candidates) {
+      if (!fs.existsSync(p)) continue;
+      const name = path.basename(p);
       const img = nativeImage.createFromPath(p);
-      if (!img.isEmpty()) icon = img.resize({ width: 16, height: 16 });
+      if (img.isEmpty()) continue;
+      icon = name === 'yuki_tray_32.png' ? img : img.resize({ width: 32, height: 32 });
+      break;
     }
   } catch (_) { /* ignore */ }
   tray = new Tray(icon);
@@ -316,12 +408,28 @@ function resetPosition() {
   const wa = screen.getPrimaryDisplay().workArea;
   const b = win.getBounds();
   win.setPosition(wa.x + wa.width - b.width - 18, wa.y + wa.height - b.height - 10);
+  saveWindowState(win.getBounds());
 }
 
 ipcMain.on('quit', () => { quitting = true; app.quit(); });
 ipcMain.on('open-logs', () => shell.openPath(LOG_DIR));
 ipcMain.on('open-models', () => shell.openPath(path.join(BASE, 'models')));
 ipcMain.on('open-settings', openSettings);
+ipcMain.on('apply-window-settings', applyWindowSettings);
+ipcMain.on('hide-window', () => { if (win) win.hide(); });
+ipcMain.on('capture-pet', () => {
+  if (!win || win.isDestroyed()) return;
+  win.capturePage().then((img) => {
+    try {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+      fs.writeFileSync(path.join(LOG_DIR, 'pet_capture.png'), img.toPNG());
+      logLine('pet captured');
+    } catch (e) { logLine('capture failed:', e && e.message); }
+  }).catch((e) => logLine('capture error:', e && e.message));
+});
+ipcMain.on('reload-avatar', () => {
+  if (win && !win.isDestroyed()) win.loadURL(APP_URL + avatarPage());
+});
 
 let dragState = null;
 let dragTimer = null;
@@ -381,8 +489,11 @@ if (!gotLock) {
     createWindow();
     startCursorBroadcast();
     createTray();
+    applyWindowSettings();
     try {
       globalShortcut.register('Alt+N', toggleWindow);
+      globalShortcut.register('CommandOrControl+Shift+Y', toggleWindow);
+      globalShortcut.register('CommandOrControl+Shift+U', toggleClickThrough);
     } catch (e) { logLine('shortcut register failed', e); }
   });
 

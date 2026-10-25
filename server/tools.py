@@ -144,6 +144,14 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_system_info",
+            "description": "查看电脑当前状态：时间日期、电量、内存占用、磁盘剩余空间、屏幕分辨率。主人问「现在几点」「还有多少电」「内存够不够」「D盘还剩多少」时用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_memo",
             "description": "把重要的事记进长期记忆（比如主人的生日、喜欢的东西、约定）。",
             "parameters": {
@@ -370,6 +378,80 @@ def _send_media_code(code: int, times: int = 1) -> None:
         return
     sends = ";".join([f"$w.SendKeys([char]{code})" for _ in range(min(times, 60))])
     _run_ps("$w=New-Object -ComObject WScript.Shell;" + sends)
+
+
+def _system_info_text() -> str:
+    """本地读取时间/电量/内存/磁盘/屏幕，返回给模型看的中文摘要。"""
+    now = _dt.datetime.now()
+    week = "一二三四五六日"[now.weekday()]
+    lines = [f"现在时间：{now.strftime('%Y-%m-%d %H:%M')}，星期{week}"]
+
+    class _POWER(ctypes.Structure):
+        _fields_ = [
+            ("ACLineStatus", wintypes.BYTE),
+            ("BatteryFlag", wintypes.BYTE),
+            ("BatteryLifePercent", wintypes.BYTE),
+            ("Reserved1", wintypes.BYTE),
+            ("BatteryLifeTime", wintypes.DWORD),
+            ("BatteryFullLifeTime", wintypes.DWORD),
+        ]
+
+    try:
+        sp = _POWER()
+        if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(sp)):
+            bp = int(sp.BatteryLifePercent) & 0xFF
+            flag = int(sp.BatteryFlag) & 0xFF
+            if (flag & 128) or bp == 255 or bp > 100:
+                lines.append("电池：这台是台式机，没有电池，直连电源")
+            else:
+                charging = "（正在充电）" if sp.ACLineStatus == 1 else ""
+                lines.append(f"电池：{bp}%{charging}")
+    except Exception:
+        pass
+
+    try:
+        class _MEM(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        mem = _MEM()
+        mem.dwLength = ctypes.sizeof(_MEM)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+            total = mem.ullTotalPhys / 1073741824
+            used = (mem.ullTotalPhys - mem.ullAvailPhys) / 1073741824
+            lines.append(f"内存：已用 {used:.1f}G / 共 {total:.1f}G（{mem.dwMemoryLoad}%）")
+    except Exception:
+        pass
+
+    try:
+        free = ctypes.c_ulonglong(0)
+        total = ctypes.c_ulonglong(0)
+        for drive in ("C:\\", "D:\\"):
+            if ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                ctypes.c_wchar_p(drive), None, ctypes.byref(total), ctypes.byref(free)
+            ):
+                lines.append(
+                    f"{drive[:1]} 盘：剩余 {free.value / 1073741824:.1f}G / 共 {total.value / 1073741824:.1f}G"
+                )
+    except Exception:
+        pass
+
+    try:
+        w = int(ctypes.windll.user32.GetSystemMetrics(0))
+        h = int(ctypes.windll.user32.GetSystemMetrics(1))
+        lines.append(f"屏幕分辨率：{w}x{h}")
+    except Exception:
+        pass
+    return "\n".join(lines)
 
 
 def _find_lnk(name: str) -> Path | None:
@@ -773,6 +855,8 @@ async def execute_tool(name: str, args: dict, ctx: dict | None = None) -> str:
             now = _dt.datetime.now()
             week = "一二三四五六日"[now.weekday()]
             return now.strftime(f"%Y年%m月%d日 %H:%M，星期{week}")
+        if name == "get_system_info":
+            return _system_info_text()
         if name == "write_memo":
             text = str(args.get("text", "")).strip()
             if not text:

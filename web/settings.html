@@ -75,6 +75,19 @@
   .muted { color: var(--muted); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
   @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+.expr-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 12px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+}
+.expr-grid label { display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.92; cursor: pointer; }
+.expr-grid input { accent-color: #8f9cff; }
+.hint { font-size: 12px; opacity: 0.7; margin: 2px 0 8px; }
 </style>
 </head>
 <body>
@@ -85,6 +98,12 @@
     <h2>她是谁</h2>
     <div class="grid2">
       <div class="row"><label>名字</label><input id="display_name" type="text" placeholder="yuki" /></div>
+      <div class="row"><label>形象</label>
+        <select id="avatar">
+          <option value="yuki">yuki（Live2D 黑猫）</option>
+          <option value="hina3d">日奈（3D MMD）</option>
+        </select>
+      </div>
       <div class="row"><label>人格</label>
         <select id="mode">
           <option value="normal">普通 yuki（可爱灵动）</option>
@@ -127,16 +146,49 @@
       <div class="toggle-row"><div class="name">主动搭话</div><label class="switch"><input id="proactive" type="checkbox"><span class="slider"></span></label></div>
       <div class="toggle-row"><div class="name">看屏幕吐槽（读屏幕文字）</div><label class="switch"><input id="screen_comment" type="checkbox"><span class="slider"></span></label></div>
       <div class="toggle-row"><div class="name">开机自动免提</div><label class="switch"><input id="wake_autostart" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">窗口置顶</div><label class="switch"><input id="always_on_top" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">开机自启</div><label class="switch"><input id="auto_start" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">点击互动（摸头/点身体）</div><label class="switch"><input id="click_react" type="checkbox"><span class="slider"></span></label></div>
+      <div class="toggle-row"><div class="name">视线跟随鼠标</div><label class="switch"><input id="gaze_follow" type="checkbox"><span class="slider"></span></label></div>
+      <div class="row"><label>视线跟随速度</label>
+        <select id="gaze_speed">
+          <option value="fast">灵敏（现在的高灵敏）</option>
+          <option value="slow">柔和（最开始的速度）</option>
+        </select>
+      </div>
+      <div class="toggle-row"><div class="name">待机小动作</div><label class="switch"><input id="idle_actions" type="checkbox"><span class="slider"></span></label></div>
     </div>
+    <div class="statusline">全局快捷键：Ctrl+Shift+Y 显示/隐藏 yuki · Ctrl+Shift+U 鼠标穿透（再按一次恢复）</div>
     <div class="row"><label>主动搭话间隔</label><input id="proactive_minutes" type="range" min="5" max="120" step="5" /><span class="val" id="proactive_val"></span></div>
-    <div class="row"><label>看屏幕吐槽间隔</label><input id="screen_comment_cooldown" type="range" min="20" max="180" step="10" /><span class="val" id="screen_comment_val"></span></div>
+    <div class="row"><label>看屏幕吐槽间隔（1~120 秒）</label><input id="screen_comment_cooldown" type="range" min="1" max="120" step="1" /><span class="val" id="screen_comment_val"></span></div>
   </div>
 
   <div class="card">
     <h2>形象（Live2D）</h2>
     <div class="row"><label>模型</label><select id="model" style="min-width:300px"></select></div>
+    <div class="toggle-row"><div class="name">显示光环（日奈 3D）</div><label class="switch"><input id="halo" type="checkbox"><span class="slider"></span></label></div>
     <div class="row"><label>大小</label><input id="scale" type="range" min="0.6" max="1.3" step="0.02" /><span class="val" id="scale_val"></span></div>
     <div class="row"><label>上下位置</label><input id="offsetY" type="range" min="-0.15" max="0.15" step="0.005" /><span class="val" id="offsetY_val"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>yuki 外观 / 表情（可多选）</h2>
+    <div class="hint">全部外观选项都在这里，勾选即常驻显示；点「保存设置」后生效。</div>
+    <div id="expr_list" class="expr-grid"></div>
+    <div class="btns" style="margin-top:8px">
+      <button type="button" onclick="exprCheckAll(false)">全部取消</button>
+      <button type="button" onclick="exprCheckAll(true)">全部勾选</button>
+    </div>
+    <div class="grid2" style="margin-top:10px">
+      <div class="row"><label>待机活跃度</label>
+        <select id="idle_level">
+          <option value="quiet">安静</option>
+          <option value="normal">普通</option>
+          <option value="lively">活泼</option>
+        </select>
+      </div>
+    </div>
+    <div class="toggle-row"><div class="name">文字回复时也对口型</div><label class="switch"><input id="talk_flap" type="checkbox"><span class="slider"></span></label></div>
   </div>
 
   <div class="card">
@@ -211,6 +263,22 @@ async function loadAll() {
   const p = state.persona, c = state.config, m = state.model;
   $('display_name').value = p.display_name || 'yuki';
   $('mode').value = p.mode || 'normal';
+  $('avatar').value = c.avatar || 'yuki';
+  // 发行包不带日奈模型：检测不到模型就把这个选项隐藏/重置
+  fetch('/models/hina3d/hina/HinaPMX.pmx', { method: 'HEAD' })
+    .then((r) => {
+      if (r.ok) return;
+      const opt = document.querySelector('#avatar option[value="hina3d"]');
+      if (opt) opt.remove();
+      if ($('avatar').value === 'hina3d') $('avatar').value = 'yuki';
+    })
+    .catch(() => {});
+  $('halo').checked = c.halo !== false;
+  state.exprMap = await (await fetch('/api/model/expressions')).json().then((d) => (d && d.expressions) || {});
+  renderExprList(c.yuki_expressions || []);
+  $('idle_level').value = c.idle_level || 'normal';
+  $('talk_flap').checked = c.talk_flap !== false;
+  window.__lastAvatar = c.avatar || 'yuki';
   fillVoices(state.voices, p.voice);
   $('rate').value = parseRate(p.rate);
   $('pitch').value = parseInt(p.pitch || '0', 10) || 0;
@@ -221,6 +289,12 @@ async function loadAll() {
   for (const id of ['auto_greet','voice_enabled','tools_enabled','awareness','proactive','screen_comment','wake_autostart']) {
     $(id).checked = !!c[id];
   }
+  $('always_on_top').checked = c.always_on_top !== false;
+  $('auto_start').checked = c.auto_start === true;
+  $('click_react').checked = c.click_react !== false;
+  $('gaze_follow').checked = c.gaze_follow !== false;
+  $('gaze_speed').value = c.gaze_speed === 'slow' ? 'slow' : 'fast';
+  $('idle_actions').checked = c.idle_actions !== false;
   $('proactive_minutes').value = Math.round(c.proactive_minutes || 18);
   $('screen_comment_cooldown').value = Math.round(c.screen_comment_cooldown || 40);
   updateIntervalLabels();
@@ -229,6 +303,38 @@ async function loadAll() {
   $('offsetY').value = m.offsetY || 0;
   updateModelLabels();
   refreshLife();
+}
+
+function renderExprList(selected) {
+  const box = $('expr_list');
+  if (!box) return;
+  box.innerHTML = '';
+  const map = state.exprMap || {};
+  const ids = Object.keys(map).sort();
+  const sel = new Set(selected || []);
+  if (!ids.length) {
+    const div = document.createElement('div');
+    div.className = 'hint';
+    div.textContent = '当前模型没有表情配置（需要 expressions_map.json）';
+    box.appendChild(div);
+    return;
+  }
+  for (const id of ids) {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = id;
+    cb.checked = sel.has(id);
+    const span = document.createElement('span');
+    span.textContent = map[id] || id;
+    label.appendChild(cb);
+    label.appendChild(span);
+    box.appendChild(label);
+  }
+}
+
+function exprCheckAll(on) {
+  document.querySelectorAll('#expr_list input').forEach((el) => { el.checked = !!on; });
 }
 
 async function refreshLife() {
@@ -259,11 +365,24 @@ function updateModelLabels() {
   $('offsetY_val').textContent = parseFloat($('offsetY').value).toFixed(3);
 }
 
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+    e.preventDefault();
+    saveAll();
+  }
+});
+
 async function saveAll() {
+  toast('保存中…（' + document.querySelectorAll('#expr_list input:checked').length + ' 个外观）');
   const body = {
     display_name: $('display_name').value.trim(),
     mode: $('mode').value,
     voice: $('voice').value,
+    avatar: $('avatar').value,
+    halo: $('halo').checked,
+    yuki_expressions: [...document.querySelectorAll('#expr_list input:checked')].map((el) => el.value),
+    idle_level: $('idle_level').value,
+    talk_flap: $('talk_flap').checked,
     rate: rateStr(parseInt($('rate').value, 10)),
     pitch: pitchStr(parseInt($('pitch').value, 10)),
     auto_greet: $('auto_greet').checked,
@@ -274,6 +393,12 @@ async function saveAll() {
     screen_comment: $('screen_comment').checked,
     screen_comment_cooldown: parseInt($('screen_comment_cooldown').value, 10),
     wake_autostart: $('wake_autostart').checked,
+    always_on_top: $('always_on_top').checked,
+    auto_start: $('auto_start').checked,
+    click_react: $('click_react').checked,
+    gaze_follow: $('gaze_follow').checked,
+    gaze_speed: $('gaze_speed').value,
+    idle_actions: $('idle_actions').checked,
     proactive_minutes: parseInt($('proactive_minutes').value, 10),
     model: $('model').value,
     scale: parseFloat($('scale').value),
@@ -286,7 +411,14 @@ async function saveAll() {
   });
   const res = await r.json();
   if (res.ok) {
+    const avatarChanged = $('avatar').value !== window.__lastAvatar;
     toast('保存成功：她现在叫「' + res.persona + '」');
+    if (window.nurowDesktop && window.nurowDesktop.applyWindowSettings) {
+      window.nurowDesktop.applyWindowSettings();
+    }
+    if (avatarChanged && window.nurowDesktop && window.nurowDesktop.reloadAvatar) {
+      setTimeout(() => window.nurowDesktop.reloadAvatar(), 400);
+    }
     setTimeout(loadAll, 300);
   } else {
     toast('保存失败：' + (res.error || '未知错误'));
